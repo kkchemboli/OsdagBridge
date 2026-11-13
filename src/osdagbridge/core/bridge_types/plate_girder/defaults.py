@@ -182,7 +182,10 @@ def _update_typical_section_defaults(input_dict: dict) -> None:
         input_dict.update({key: value})
 
     # --- Deck Detail sub-tab ---
-    _update(KEY_TS_DECK_THICKNESS,     250.0)                        # mm
+    # Independent of the basic inputs, so a value the user already set (CAD double-click or
+    # Additional Inputs) is kept; the default only fills an empty field.
+    if input_dict.get(KEY_TS_DECK_THICKNESS) in (None, ""):
+        _update(KEY_TS_DECK_THICKNESS, 250.0)                        # mm
     _update(KEY_TS_FOOTPATH_WIDTH,     IS_DEFAULT_FOOTPATH_WIDTH_M)  # m
     _update(KEY_TS_FOOTPATH_THICKNESS, 100.0)                        # mm
 
@@ -932,6 +935,13 @@ def solve_layout_for_spacing(input_dict: dict, girder_spacing: float):
     return result
 
 
+def _as_float(value):
+    try:
+        return None if value in (None, "") else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def solve_extend_basic_input_dict(basic_input_dict: dict) -> None:
     """Parse basic inputs and solve bridge layout. Updates basic_input_dict in-place."""
 
@@ -952,6 +962,22 @@ def solve_extend_basic_input_dict(basic_input_dict: dict) -> None:
         or seed_no_of_girders(solver.calculate_overall_bridge_width())
     )
     sizing_result = solver._solve_layout(no_of_girders=no_of_girders, changed_field='girders')
+
+    # Keep a girder spacing the user already chose (CAD double-click / Additional Inputs) while the
+    # overall bridge width it was solved for is unchanged; the overhang follows from it.  A changed
+    # width (carriageway, footpath or median edit) or a spacing that no longer fits falls back to the
+    # computed default above.
+    prev_spacing = _as_float(basic_input_dict.get(KEY_TS_GIRDER_SPACING))
+    prev_width   = _as_float(basic_input_dict.get(KEY_TS_OVERALL_WIDTH))
+    if (prev_spacing and prev_width is not None
+            and abs(prev_width - sizing_result.overall_width) < 1e-6
+            and abs(prev_spacing - sizing_result.girder_spacing) > 1e-9):
+        try:
+            sizing_result = solver._solve_layout(
+                no_of_girders=no_of_girders, girder_spacing=prev_spacing, changed_field='spacing',
+            )
+        except ValueError:
+            pass
 
     print("[DEBUG] Bridge Layout Sizing Result:")
     print(f"  overall_width = {sizing_result.overall_width} m")
