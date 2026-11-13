@@ -5,7 +5,7 @@ Author: Arushi
 """
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QSplitter, QScrollArea, QHBoxLayout, QPushButton, QLabel
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, Signal
 from .cad_cross_section import CrossSectionCADWidget
 from .cad_top_view import TopViewCADWidget
 from osdagbridge.core.utils.common import *
@@ -17,6 +17,9 @@ from osdagbridge.desktop.cad.irc5_geometry import (
 
 class BridgeDualCADWidget(QWidget):
     """Split view widget showing both cross-section and top view with individual controls"""
+
+    # (KEY_*, typed text) - a dimension label was edited in place on either canvas
+    dimension_edit_requested = Signal(str, str)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,6 +53,8 @@ class BridgeDualCADWidget(QWidget):
         # Create cross-section scroll area
         self.cross_section_widget = CrossSectionCADWidget(self)
         # self.cross_section_widget.setMinimumSize(800, 600)
+        self.cross_section_widget.interactive_edit = True
+        self.cross_section_widget.dimension_edit_requested.connect(self.dimension_edit_requested)
         
         self.cross_scroll = QScrollArea()
         self.cross_scroll.setWidget(self.cross_section_widget)
@@ -62,6 +67,8 @@ class BridgeDualCADWidget(QWidget):
         # Create top view scroll area
         self.top_view_widget = TopViewCADWidget(self)
         # self.top_view_widget.setMinimumSize(800, 600)
+        self.top_view_widget.interactive_edit = True
+        self.top_view_widget.dimension_edit_requested.connect(self.dimension_edit_requested)
         
         self.top_scroll = QScrollArea()
         self.top_scroll.setWidget(self.top_view_widget)

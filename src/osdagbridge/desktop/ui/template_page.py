@@ -17,7 +17,10 @@ from osdagbridge.desktop.ui.dialogs.loading_popup import LoadingDialogManager
 from osdagbridge.desktop.ui.cad_3d import CAD3DWindow
 
 from osdagbridge.core.bridge_types.plate_girder.ui_fields import FrontendData
-from osdagbridge.core.bridge_types.plate_girder.defaults import BASIC_INPUT_DICT, solve_extend_basic_input_dict
+from osdagbridge.core.bridge_types.plate_girder.defaults import (
+    BASIC_INPUT_DICT, solve_extend_basic_input_dict, solve_layout_for_spacing,
+)
+from osdagbridge.desktop.ui.utils.cad_dimension_edit import DIMENSION_SPECS
 from osdagbridge.core.utils.common import *
 from osdagbridge.core.utils.osi_validator import validate_osi_inputs
 from osdagbridge.core.utils.logger import bridge_logger
@@ -457,6 +460,12 @@ class CustomWindow(QWidget):
             # there is some mapping that takes place in BridgeDualCADWidget which can worst the things
             self.cad_comp_widget.cross_section_widget.update_params(cad_state)
 
+            # The Save also committed the dialog values into self.input_dict, so push them through the
+            # normal mapping as well: this keeps BridgeDualCADWidget._last_mapped_params in step with what
+            # the canvas shows (otherwise a later edit back to the old value is seen as "unchanged" and
+            # never redrawn) and refreshes the top view too.
+            self.cad_comp_widget.update_from_osdag_inputs(self.input_dict)
+
     def _show_additional_inputs(self, target_tab: str | None = None):
         """
         Sync live state into the dialog, then show it.
@@ -788,6 +797,101 @@ class CustomWindow(QWidget):
         # This will update the CAD whenever any input field changes
         if hasattr(self.input_dock, 'input_value_changed'):
             self.input_dock.input_value_changed.connect(self.update_cad_from_inputs)        
+
+        # Double-click editing of dimension labels on the 2D CAD canvases
+        self.cad_comp_widget.dimension_edit_requested.connect(self._on_cad_dimension_edited)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Interactive 2D CAD parameter editing
+    # The canvases only report (key, typed text); validation, storage and redraw happen here.
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # Parameters edited through the basic-input panel (same validation/popups as typing there)
+    _CAD_BASIC_KEYS = (KEY_SPAN, KEY_CARRIAGEWAY_WIDTH)
+
+    def _on_cad_dimension_edited(self, key: str, text: str):
+        spec = DIMENSION_SPECS.get(key)
+        if spec is None or not spec.editable or not self.input_dock:
+            return                                  # derived values are never written from the CAD
+
+        if self.input_dock.is_locked:               # results exist - unlock to edit, as in the input dock
+            self.input_dock.show_lock_tooltip()
+            return
+
+        try:
+            float(text)
+        except ValueError:
+            return
+
+        if key in self._CAD_BASIC_KEYS:
+            self._apply_cad_basic_edit(key, text)
+        else:
+            self._apply_cad_additional_edit(key, text)
+
+    def _reject_cad_edit(self, message: str):
+        """Out-of-range or infeasible value: warn and keep the previous value (no clamping)."""
+        CustomMessageBox(
+            title="Input Error",
+            text=f"{message}\n\nThe value was not changed.",
+            dialogType=MessageBoxType.Warning,
+        ).exec()
+
+    def _apply_cad_basic_edit(self, key: str, text: str):
+        """Span / carriageway width: validate first, then write into the input-dock field."""
+        widget = self.input_dock._w(key)
+        if not isinstance(widget, QLineEdit):
+            return
+
+        # Validate on a copy so a rejected value never reaches the field or the dict
+        trial = dict(self.input_dict)
+        trial[key] = text
+        result = self.input_dock.validator.validate_basic_inputs(key, trial)
+        if result is not None:
+            self._reject_cad_edit(result[1])
+            return
+
+        widget.blockSignals(True)
+        widget.setText(text)
+        widget.blockSignals(False)
+        self.input_dock.reset_error_state(widget)       # field is filled now: drop the red "required" border
+        self.input_dock._on_field_edited(key, widget)   # stores, re-solves the layout and redraws
+
+    def _apply_cad_additional_edit(self, key: str, text: str):
+        """
+        Deck thickness / girder spacing: same gate as the Additional Inputs dialog (all required
+        fields filled), then validate -> store -> (re-solve layout) -> redraw. A rejected value
+        leaves every stored value as it was.
+        """
+        if not self.validate_required_inputs():
+            return                                      # popup + red fields, as for Additional Inputs
+
+        d = self.input_dict
+        # Bring the dict up to date so the validator/solver see the current layout
+        try:
+            if self.input_dock.is_require_field_changed or d.get(KEY_TS_OVERALL_WIDTH) is None:
+                solve_extend_basic_input_dict(d)
+                self.input_dock.is_require_field_changed = False
+        except Exception as exc:
+            self._reject_cad_edit(f"Could not update the bridge layout: {exc}")
+            return
+
+        value = float(text)
+        trial = dict(d)
+        trial[key] = value
+        result = self.input_dock.validator.validate_additional_inputs(key, trial)
+        if result is not None:
+            self._reject_cad_edit(result[1])
+            return
+
+        if key == KEY_TS_GIRDER_SPACING:
+            try:
+                solve_layout_for_spacing(trial, value)  # overhang follows from spacing
+            except ValueError as exc:
+                self._reject_cad_edit(str(exc))         # like a rejected setDatum
+                return
+
+        d.update(trial)
+        self.cad_comp_widget.update_from_osdag_inputs(d)
             
     # Function for saving input dictionary into an OSI file
     def saveOSI_inputs(self):
