@@ -1410,6 +1410,13 @@ VALUES_GIRDER_SUPPORT_TYPE = [
     "Major Laterally Unsupported",
 ]
 VALUES_GIRDER_DESIGN_MODE = ["Optimized", "Custom"]
+
+# Option text that switches a parameter to a user-supplied ("Custom") value
+VALUE_CUSTOM = "Custom"
+# Suffix of the key that stores the values picked for an All / Custom dropdown
+KEY_SUFFIX_SELECTED = ".selected"
+# Additional Inputs pre-save validation: a "Custom" parameter whose input is still empty
+MSG_CUSTOM_VALUE_EMPTY = "Error: The custom value for '{name}' cannot be empty."
 VALUES_GIRDER_SPAN_MODE = ["Full Length", "Custom"]
 VALUES_PROFILE_SCOPE = ["All", "Custom"]
 VALUES_OPTIMIZATION_MODE = ["Optimized", "Custom", "All"]

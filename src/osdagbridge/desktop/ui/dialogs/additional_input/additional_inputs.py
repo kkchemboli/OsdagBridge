@@ -7,7 +7,7 @@ from copy import deepcopy
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QTabBar, QLabel, QLineEdit,
     QComboBox, QPushButton, QCheckBox, QSizePolicy,
-    QDialog, QSizePolicy, QSizeGrip,
+    QDialog, QSizePolicy, QSizeGrip, QStackedWidget,
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QEvent
 from PySide6.QtGui import QDoubleValidator
@@ -19,7 +19,12 @@ from osdagbridge.desktop.ui.dialogs.tabs.common import apply_field_style, create
 from osdagbridge.desktop.ui.dialogs.custom_messagebox import CustomMessageBox, MessageBoxType
 from osdagbridge.desktop.ui.utils.custom_widgets import SmartCursorComboBoxView
 from osdagbridge.desktop.ui.dialogs.additional_input.ui_builder.common_ui_builder import UIBuilder
-from osdagbridge.core.bridge_types.plate_girder.ui_fields_additional_input import ADDITIONAL_INPUTS_SCHEMA
+from osdagbridge.core.bridge_types.plate_girder.ui_fields_additional_input import (
+    ADDITIONAL_INPUTS_SCHEMA,
+    CUSTOM_MODE_FIELDS, CUSTOM_TYPE_FIELDS,
+    CUSTOM_GIRDER_TEXT_FIELDS, CUSTOM_GIRDER_SYMMETRIC_SKIP, CUSTOM_GIRDER_SELECT_FIELDS,
+    additional_input_label,
+)
 from osdagbridge.desktop.ui.dialogs.additional_input.ui_builder._load_combination_widget import LoadCombinationWidget
 from osdagbridge.desktop.ui.dialogs.additional_input.ui_builder.common_ui_builder import AdaptiveWidget
 
@@ -508,6 +513,15 @@ class AdditionalInputs(QDialog):
 
     def _save_inputs(self):  # on_change: validates all tabs then commits working_input_dict and emits CAD update signal
 
+        # Halt the save while any "Custom" parameter still has an empty input
+        missing = self._validate_custom_fields()
+        if missing:
+            self._go_to_missing_field(missing[0])
+            self._show_validation_errors(
+                [MSG_CUSTOM_VALUE_EMPTY.format(name=item["name"]) for item in missing]
+            )
+            return
+
         # Flush the currently-displayed stiffener member's widgets before committing.
         # _save_stiffener_member_data otherwise only runs when switching *away* from a
         # member (via _on_stiffener_member_load), so the last-viewed girder (e.g. G4)
@@ -529,14 +543,156 @@ class AdditionalInputs(QDialog):
             dialogType=MessageBoxType.Success,
         ).exec()
 
-    def _show_validation_errors(self, errors):  # utility: displays validation error list in a warning popup
-        message = "\n\n".join(f"• {err}" for err in errors)
+    def _show_validation_errors(self, errors):  # utility: displays validation error list in the standard error popup
+        message = "\n".join(str(err) for err in errors)
         CustomMessageBox(
             title="Validation Errors",
             text=message,
             buttons=["OK"],
-            dialogType=MessageBoxType.Warning,
+            dialogType=MessageBoxType.Critical,
         ).exec()
+
+    # ── Pre-Save Validation: "Custom" parameters with an empty input ─────────────
+
+    def _tab_path(self, widget):  # utility: [(QTabWidget, index), ...] outermost first for the tab pages holding widget; None if one of them is disabled
+        path = []
+        w = widget
+        while w is not None and w is not self:
+            parent = w.parentWidget()
+            tabs = parent.parentWidget() if isinstance(parent, QStackedWidget) else None
+            if isinstance(tabs, QTabWidget):
+                idx = tabs.indexOf(w)
+                if idx != -1:
+                    if not tabs.isTabEnabled(idx):
+                        return None
+                    path.append((tabs, idx))
+            w = parent
+        path.reverse()
+        return path
+
+    def _is_input_open(self, widget) -> bool:  # utility: True if the user can type in widget (enabled and not hidden; a tab that is merely not in front still counts)
+        if widget is None or not widget.isEnabled():
+            return False
+        w = widget
+        while w is not None and w is not self:
+            parent = w.parentWidget()
+            tabs = parent.parentWidget() if isinstance(parent, QStackedWidget) else None
+            if w.isHidden() and not isinstance(tabs, QTabWidget):
+                return False
+            w = parent
+        return True
+
+    def _is_open_custom_value(self, key: str) -> bool:  # utility: True if key is the input of a parameter currently set to Custom
+        for _param, mode_key, value_key in CUSTOM_MODE_FIELDS:
+            if key == value_key:
+                combo = self.findChild(QComboBox, mode_key)
+                return combo is not None and combo.currentText() == VALUE_CUSTOM
+        for combo_key, _tab, value_keys in CUSTOM_TYPE_FIELDS:
+            if key in value_keys:
+                combo = self.findChild(QComboBox, combo_key)
+                if combo is not None and combo.currentText() == VALUE_CUSTOM:
+                    return True
+        if key in CUSTOM_GIRDER_TEXT_FIELDS:
+            return str(self.working_input_dict.get(KEY_DESIGN_MODE, "")).strip() == VALUES_GIRDER_DESIGN_MODE[1]
+        return False
+
+    def _girder_members(self):  # utility: yields (girder_index, member_index), 1-based, for every stored girder member
+        d = self.working_input_dict
+        try:
+            count = int(float(str(d.get(KEY_TS_NO_OF_GIRDERS) or 0)))
+        except (TypeError, ValueError):
+            count = 0
+        for gi in range(1, count + 1):
+            segments = d.get(f"{KEY_MP_GD_SEGMENT_TABLE}.G{gi}") or [None]
+            for mi in range(1, len(segments) + 1):
+                yield gi, mi
+
+    def _validate_custom_fields(self) -> list:  # validation: lists every "Custom" parameter whose input is empty, tab by tab
+        """
+        Returns [{"name", "path", "widget", "member"}, ...] in tab order; empty when the
+        inputs can be saved. Parameters inside a disabled tab are not checked.
+        """
+        found = []
+
+        def add(name, widget, member=None):
+            path = self._tab_path(widget)
+            if path:                                    # None/[] -> inactive tab
+                found.append({"name": name, "path": path, "widget": widget, "member": member})
+
+        # Mode dropdown set to Custom + its value box
+        for key, mode_key, value_key in CUSTOM_MODE_FIELDS:
+            combo = self.findChild(QComboBox, mode_key)
+            box   = self.findChild(QLineEdit, value_key)
+            if combo is None or box is None or combo.currentText() != VALUE_CUSTOM:
+                continue
+            if self._is_input_open(box) and not box.text().strip():
+                add(additional_input_label(key), box)
+
+        # Type/material dropdown set to Custom + the boxes it unlocks
+        for combo_key, tab_key, value_keys in CUSTOM_TYPE_FIELDS:
+            combo = self.findChild(QComboBox, combo_key)
+            if combo is None or combo.currentText() != VALUE_CUSTOM:
+                continue
+            for value_key in value_keys:
+                box = self.findChild(QLineEdit, value_key)
+                if self._is_input_open(box) and not box.text().strip():
+                    add(additional_input_label(value_key, tab_key), box)
+
+        # Girder inputs, stored once per girder member
+        d = self.working_input_dict
+        is_custom_design = str(d.get(KEY_DESIGN_MODE, "")).strip() == VALUES_GIRDER_DESIGN_MODE[1]
+        current = self._get_current_girder_member_indices()
+        for gi, mi in self._girder_members():
+            suffix = f".G{gi}.M{mi}"
+            if str(d.get(KEY_MP_GIRDER_TYPE + suffix, VALUES_GIRDER_TYPE[0])) != VALUES_GIRDER_TYPE[0]:
+                continue                                # rolled section: welded inputs are not used
+            member_name = f"(G{gi} M{mi})"
+
+            if is_custom_design:
+                # Design Type = Custom: depth and flange widths are typed in
+                symmetric = str(d.get(KEY_MP_GIRDER_SYMMETRY + suffix, "")).strip() == VALUES_GIRDER_SYMMETRY[0]
+                for key in CUSTOM_GIRDER_TEXT_FIELDS:
+                    if symmetric and key in CUSTOM_GIRDER_SYMMETRIC_SKIP:
+                        continue
+                    holder = self.findChild(QWidget, key)
+                    active = holder.currentWidget() if isinstance(holder, AdaptiveWidget) else holder
+                    if (gi, mi) == current and isinstance(active, QLineEdit):
+                        value = active.text()           # member on screen: what the box shows
+                    elif key + suffix in d:
+                        value = d[key + suffix]
+                    else:
+                        continue
+                    if value is None or not str(value).strip():
+                        add(f"{additional_input_label(key)} {member_name}", holder, (gi, mi))
+            else:
+                # All / Custom thickness dropdown: Custom needs at least one picked value
+                for key in CUSTOM_GIRDER_SELECT_FIELDS:
+                    if d.get(key + suffix) == VALUE_CUSTOM and not d.get(key + KEY_SUFFIX_SELECTED + suffix):
+                        add(f"{additional_input_label(key)} {member_name}", self.findChild(QWidget, key), (gi, mi))
+
+        # Report tab by tab, skipping inactive top-level tabs
+        ordered = []
+        for top in range(self.tabs.count()):
+            if not self.tabs.isTabEnabled(top):
+                continue
+            in_tab = [item for item in found if item["path"][0] == (self.tabs, top)]
+            ordered += sorted(in_tab, key=lambda item: [idx for _tabs, idx in item["path"][1:]])
+        return ordered
+
+    def _go_to_missing_field(self, item: dict) -> None:  # utility: brings a field reported by _validate_custom_fields to the front and focuses it
+        for tabs, idx in item["path"]:
+            tabs.setCurrentIndex(idx)
+        if item.get("member"):
+            gi, mi = item["member"]
+            for key, index in ((KEY_MP_GD_SELECT_GIRDER, gi - 1), (KEY_MP_GD_MEMBER_ID, mi - 1)):
+                combo = self.findChild(QComboBox, key)
+                if combo is not None and 0 <= index < combo.count():
+                    combo.setCurrentIndex(index)
+        widget = item["widget"]
+        if isinstance(widget, AdaptiveWidget):
+            widget = widget.currentWidget()
+        if widget is not None:
+            widget.setFocus()
 
     # ── Field Change Handling ────────────────────────────────────────────────────
 
@@ -565,6 +721,13 @@ class AdditionalInputs(QDialog):
             return
 
         current_text = widget.text().strip()
+
+        # An empty Custom value is not corrected here: the Save check reports it by name
+        # (no "must be a numeric value" popup and no made-up replacement value).
+        if not current_text and self._is_open_custom_value(key):
+            self.working_input_dict[key] = ""
+            return
+
         self._update_input_dict(key, current_text)
 
         result = self.validator.validate_additional_inputs(key, self.working_input_dict)
