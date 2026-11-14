@@ -4121,6 +4121,17 @@ CUSTOM_GIRDER_SELECT_FIELDS = [
 ]
 
 
+# Dropdowns that only choose which girder/member is displayed. Picking another entry
+# is navigation, not an edit, so it never counts as an unsaved change.
+ADDITIONAL_INPUT_SELECTOR_KEYS = [
+    KEY_MP_GD_SELECT_GIRDER,
+    KEY_MP_GD_MEMBER_ID,
+    KEY_MP_STIFFENER_SELECT_MEMBER_ID,
+    KEY_MP_CB_SELECT_GIRDERS,
+    KEY_MP_ED_SELECT_GIRDERS,
+]
+
+
 def _schema_entry(key, node=ADDITIONAL_INPUTS_SCHEMA):
     """First schema dict whose "id" is *key* (fields and sub-tabs alike)."""
     if isinstance(node, dict):

@@ -1417,6 +1417,10 @@ VALUE_CUSTOM = "Custom"
 KEY_SUFFIX_SELECTED = ".selected"
 # Additional Inputs pre-save validation: a "Custom" parameter whose input is still empty
 MSG_CUSTOM_VALUE_EMPTY = "Error: The custom value for '{name}' cannot be empty."
+# Additional Inputs unsaved-changes warning shown when the dialog is closed
+MSG_UNSAVED_CHANGES = "You have unsaved changes. Closing this window will discard them. Do you want to proceed?"
+BTN_DISCARD = "Discard"
+BTN_CANCEL = "Cancel"
 VALUES_GIRDER_SPAN_MODE = ["Full Length", "Custom"]
 VALUES_PROFILE_SCOPE = ["All", "Custom"]
 VALUES_OPTIMIZATION_MODE = ["Optimized", "Custom", "All"]
