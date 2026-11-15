@@ -282,6 +282,17 @@ def test_custom_thickness_with_nothing_picked_is_caught(dialog):
 
 
 # ---------------------------------------------------------------- empty Custom values: one message, from Save
+def _user_types_and_leaves(dlg, qapp, box, text):
+    dlg.activateWindow()
+    box.setFocus()
+    qapp.processEvents()
+    box.selectAll()
+    from PySide6.QtTest import QTest
+    QTest.keyClicks(box, text)
+    _quiet(lambda: dlg.tabs.setFocus())                       # user leaves the box
+    qapp.processEvents()
+
+
 def _user_empties(dlg, qapp, box):
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
@@ -325,14 +336,14 @@ def test_after_filling_the_reported_value_save_goes_through(dialog, qapp):
     assert float(live[KEY_WL_GUST_FACTOR_VALUE]) == 2.5
 
 
-def test_a_non_empty_out_of_range_custom_value_is_still_corrected(dialog):
+def test_a_non_empty_out_of_range_custom_value_is_rejected_and_goes_back(dialog, qapp):
     dlg, _live, popups = dialog
     _quiet(lambda: _combo(dlg, KEY_WL_GUST_FACTOR_MODE).setCurrentText(VALUE_CUSTOM))
     box = _box(dlg, KEY_WL_GUST_FACTOR_VALUE)
-    box.setText("1.5")
-    _quiet(box.editingFinished.emit)
+    _user_types_and_leaves(dlg, qapp, box, "2.5")
+    _user_types_and_leaves(dlg, qapp, box, "1.5")                 # below the allowed range
     assert [p.title for p in popups.shown] == ["Input Error"]
-    assert box.text() != "1.5"
+    assert box.text() == "2.5"                                     # back to the accepted value
 
 
 # ---------------------------------------------------------------- thickness pick-list (real pop-up)
@@ -354,4 +365,95 @@ def test_custom_thickness_pick_list(dialog, monkeypatch, move_all_out, expected)
     _quiet(lambda: dlg.findChild(QWidget, KEY_MP_GIRDER_WEB_THICKNESS).currentWidget().setCurrentText(VALUE_CUSTOM))
     _save(dlg)
     assert popups.shown[-1].text == (expected or "Inputs saved successfully.")
+
+
+
+# ---------------------------------------------------------------- Save while a box is still being edited
+def _type_then_click_save(dlg, qapp, key, text):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    box = _box(dlg, key)
+    dlg.activateWindow()
+    box.setFocus()
+    qapp.processEvents()
+    box.selectAll()
+    if text:
+        QTest.keyClicks(box, text)
+    else:
+        QTest.keyClick(box, Qt.Key_Delete)
+    _quiet(lambda: QTest.mouseClick(dlg.save_button, Qt.LeftButton))
+    qapp.processEvents()
+    return box
+
+
+def test_save_button_does_not_take_the_focus(dialog):
+    from PySide6.QtCore import Qt
+    dlg, _live, _popups = dialog
+    assert dlg.save_button.focusPolicy() == Qt.NoFocus
+
+
+@pytest.mark.parametrize("text,warning", [
+    ("0", "Input Error"),        # below the range
+    ("40", "Input Error"),       # above the range
+    ("13", "Layout"),            # in range, but the spacing would be below the minimum
+])
+def test_rejected_girder_count_on_save_warns_only_and_goes_back(dialog, qapp, text, warning):
+    dlg, live, popups = dialog
+    before = dict(live)
+    start = _box(dlg, KEY_TS_NO_OF_GIRDERS).text()
+    spacing = _box(dlg, KEY_TS_GIRDER_SPACING).text()
+
+    box = _type_then_click_save(dlg, qapp, KEY_TS_NO_OF_GIRDERS, text)
+
+    assert [p.title for p in popups.shown] == [warning]                    # no "Saved"
+    assert box.text() == start                                             # back to what it was
+    assert _box(dlg, KEY_TS_GIRDER_SPACING).text() == spacing              # layout untouched
+    assert live == before
+
+
+def test_valid_girder_count_on_save_is_saved(dialog, qapp):
+    dlg, live, popups = dialog
+    _type_then_click_save(dlg, qapp, KEY_TS_NO_OF_GIRDERS, "6")
+    assert [p.title for p in popups.shown] == ["Saved"]
+    assert int(live[KEY_TS_NO_OF_GIRDERS]) == 6
+
+
+def test_any_value_rejected_while_saving_stops_the_save(dialog, qapp):
+    dlg, live, popups = dialog
+    before = dict(live)
+    _type_then_click_save(dlg, qapp, KEY_TS_DECK_THICKNESS, "900")
+    assert [p.title for p in popups.shown] == ["Input Error"]
+    assert live == before
+
+
+# ---------------------------------------------------------------- a rejected value goes back to what it was
+@pytest.mark.parametrize("key,text", [
+    (KEY_TS_DECK_THICKNESS, "900"),
+    (KEY_TS_GIRDER_SPACING, "40"),
+    (KEY_WC_THICKNESS, "99999"),
+    (KEY_TS_NO_OF_GIRDERS, "1"),
+])
+def test_rejected_value_goes_back_to_the_previous_value_not_a_limit(dialog, qapp, key, text):
+    dlg, live, popups = dialog
+    box = _box(dlg, key)
+    before = box.text()
+    spacing = _box(dlg, KEY_TS_GIRDER_SPACING).text()
+
+    _user_types_and_leaves(dlg, qapp, box, text)
+
+    assert [p.title for p in popups.shown] == ["Input Error"]   # one warning, no follow-up layout error
+    assert box.text() == before
+    assert _box(dlg, KEY_TS_GIRDER_SPACING).text() == spacing
+    _save(dlg)
+    assert popups.shown[-1].title == "Saved"
+    assert float(live[key]) == pytest.approx(float(before))      # the previous value is what got saved
+
+
+def test_an_accepted_value_becomes_the_new_previous_value(dialog, qapp):
+    dlg, _live, popups = dialog
+    box = _box(dlg, KEY_TS_DECK_THICKNESS)
+    _user_types_and_leaves(dlg, qapp, box, "300")
+    assert popups.shown == []
+    _user_types_and_leaves(dlg, qapp, box, "900")
+    assert box.text() == "300"
 

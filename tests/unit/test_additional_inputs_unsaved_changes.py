@@ -323,6 +323,6 @@ def test_cancel_keeps_the_typed_value_and_it_is_still_validated_when_leaving_the
 
     assert real_boxes["opened"] == ["Unsaved Changes", "Layout"]   # validated, one box at a time
     assert real_boxes["max_depth"] == 1
-    assert box.text() != "11"                                  # rejected value was reset, as before
+    assert box.text() == "4"                                   # back to the value before the edit
     dlg.is_modified = False
     dlg.hide()

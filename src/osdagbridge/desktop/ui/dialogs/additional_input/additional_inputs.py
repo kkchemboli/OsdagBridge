@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QComboBox, QPushButton, QCheckBox, QSizePolicy,
     QDialog, QSizePolicy, QSizeGrip, QStackedWidget, QTableWidget, QApplication,
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QEvent
+from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QEvent, QObject
 from PySide6.QtGui import QDoubleValidator
 
 from osdagbridge.core.bridge_types.plate_girder.validator import BridgeInputValidator
@@ -33,6 +33,35 @@ from osdagbridge.desktop.ui.dialogs.additional_input.ui_builder.common_ui_builde
 # =================================================================================
 #   MAIN IMPLEMENTATION
 # =================================================================================
+
+class _EditStartRecorder(QObject):
+    """Remembers the text a box had before the user started editing it.
+
+    A rejected value goes back to this text. The text is recorded when the box gets the
+    focus, except while an edit is still in progress in it (from the first keystroke until
+    the value is accepted or rejected), so focus coming back after a warning or a window
+    switch does not replace it with the half-typed value.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.start_text = {}
+        self._editing = set()
+
+    def track(self, box) -> None:
+        box.installEventFilter(self)
+        box.textEdited.connect(lambda _text, b=box: self._editing.add(b))
+
+    def finished(self, box) -> None:
+        """Call after the box's own editingFinished handlers: its text is the new start."""
+        self._editing.discard(box)
+        self.start_text[box] = box.text()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.FocusIn and isinstance(obj, QLineEdit) and obj not in self._editing:
+            self.start_text[obj] = obj.text()
+        return False
+
 
 class AdditionalInputs(QDialog):
     """Main dialog for Additional Inputs with tabbed interface"""
@@ -69,6 +98,13 @@ class AdditionalInputs(QDialog):
         # Closing the dialog while it is set asks before discarding the changes.
         self.is_modified = False
         self._close_confirmed = False
+        # Box the user has typed in since it last finished editing (validated on Save)
+        self._pending_edit_box = None
+        # Counts edits that were rejected with a warning; Save stops if its own check of
+        # the box being edited adds one
+        self._rejected_edits = 0
+        # Text each box had before the user started editing it
+        self._edit_start = _EditStartRecorder(self)
 
         self.setObjectName("AdditionalInputs")
         self.setMinimumSize(900, 520)
@@ -173,6 +209,10 @@ class AdditionalInputs(QDialog):
         from pprint import pprint
         self.defaults_button.clicked.connect(lambda: pprint(self.working_input_dict))
 
+        # Clicking Save must not take the focus: losing focus would validate the box being
+        # edited during the click (warning) and Save would then carry on regardless.
+        # _save_inputs validates that box itself and stops if the value is rejected.
+        self.save_button.setFocusPolicy(Qt.NoFocus)
         self.save_button.clicked.connect(self._save_inputs)
         main_layout.addSpacing(6)
         main_layout.addWidget(action_bar)
@@ -527,6 +567,13 @@ class AdditionalInputs(QDialog):
 
     def _save_inputs(self):  # on_change: validates all tabs then commits working_input_dict and emits CAD update signal
 
+        # Finish the box still being edited first; if its value is rejected, its own warning
+        # has been shown and the value restored, so stop here instead of saving.
+        rejected_before = self._rejected_edits
+        self._finish_pending_edit()
+        if self._rejected_edits != rejected_before:
+            return
+
         # Halt the save while any "Custom" parameter still has an empty input
         missing = self._validate_custom_fields()
         if missing:
@@ -590,7 +637,11 @@ class AdditionalInputs(QDialog):
 
         for box in self.findChildren(QLineEdit):
             if _is_new(box):
+                self._edit_start.track(box)
                 box.textEdited.connect(self._mark_modified)
+                box.textEdited.connect(lambda _text, b=box: setattr(self, "_pending_edit_box", b))
+                box.editingFinished.connect(lambda b=box: self._clear_pending_edit(b))
+                box.editingFinished.connect(lambda b=box: self._edit_start.finished(b))
 
         for combo in self.findChildren(QComboBox):
             if combo.objectName() in ADDITIONAL_INPUT_SELECTOR_KEYS or not _is_new(combo):
@@ -622,6 +673,18 @@ class AdditionalInputs(QDialog):
         for segments in self.findChildren(SegmentTableWidget):
             if _is_new(segments):
                 segments.user_edited.connect(self._mark_modified)
+
+    def _clear_pending_edit(self, box) -> None:  # state: box finished editing (Enter / focus loss)
+        if self._pending_edit_box is box:
+            self._pending_edit_box = None
+
+    def _finish_pending_edit(self) -> None:  # utility: runs the edited box's own validation now, as leaving it would
+        box = self._pending_edit_box
+        self._pending_edit_box = None
+        if box is not None and box.hasFocus() and self.isAncestorOf(box):
+            # Same as the user leaving the box: Qt runs its editingFinished handlers once.
+            # (Emitting the signal directly would run them again when a warning takes the focus.)
+            box.clearFocus()
 
     def _confirm_discard_changes(self) -> bool:  # state: True if the dialog may close (no unsaved changes, or the user chose Discard)
         if not self.is_modified or getattr(self, "_locked", False):
@@ -862,6 +925,12 @@ class AdditionalInputs(QDialog):
         print(f"@@: After Edited Validation result for {key} = {result}")
         if result is not None:
             corrected, message = result
+            self._rejected_edits += 1
+            # Go back to the value the box had before this edit instead of a clamped one
+            # (the validator's corrected value is only used if that is unknown)
+            previous = self._edit_start.start_text.get(widget)
+            if previous is not None:
+                corrected = previous
             CustomMessageBox(
                 title="Input Error",
                 text=message,
@@ -870,7 +939,10 @@ class AdditionalInputs(QDialog):
             widget.blockSignals(True)
             widget.setText(str(corrected))
             widget.blockSignals(False)
-            self._update_input_dict(key, str(corrected))
+            if str(corrected).strip() == "":
+                self.working_input_dict[key] = ""   # an empty Custom value: stays empty, reported on Save
+            else:
+                self._update_input_dict(key, str(corrected))
 
         self._update_additional_input_cad()
 
@@ -1031,6 +1103,7 @@ class AdditionalInputs(QDialog):
                     w.blockSignals(True)
                     w.clear()
                     w.blockSignals(False)
+            self._rejected_edits += 1
             CustomMessageBox(
                 title="Layout",
                 text="Girder spacing, deck overhang, and number of girders are linked. Please enter all three.",
@@ -1082,6 +1155,7 @@ class AdditionalInputs(QDialog):
                     w = self.findChild(QLineEdit, KEY_TS_NO_OF_GIRDERS)
                     if w:
                         w.setText(str(int(float(prev))))
+            self._rejected_edits += 1
             CustomMessageBox(title="Layout", text=str(exc), buttons=["OK"], dialogType=MessageBoxType.Warning).exec()
             return False
 
