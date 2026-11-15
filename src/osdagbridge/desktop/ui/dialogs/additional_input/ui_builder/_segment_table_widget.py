@@ -103,6 +103,7 @@ class SegmentTableWidget(QWidget):
     # Signals — connect from outside to react to user actions
     row_selected   = Signal(int, str)   # (row_index, member_id)
     data_changed   = Signal(object)     # segments list or {action, row, segments}
+    user_edited    = Signal()           # the user added/removed a row or edited a cell (never on a programmatic refresh)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -361,6 +362,7 @@ class SegmentTableWidget(QWidget):
         row = item.row()
         if row >= len(self._segments):
             return
+        self.user_edited.emit()
         try:
             new_end = float(item.text())
         except ValueError:
@@ -435,6 +437,7 @@ class SegmentTableWidget(QWidget):
         self._table.blockSignals(False)
 
     def _on_add_clicked(self, row: int) -> None:
+        self.user_edited.emit()
         """Split segment at row into two equal halves.
         Refresh is deferred via QTimer so the button signal fully completes
         before the cell widget is destroyed and recreated by _repopulate.
@@ -464,6 +467,7 @@ class SegmentTableWidget(QWidget):
         self.data_changed.emit(list(self._segments))
 
     def _on_remove_clicked(self, row: int) -> None:
+        self.user_edited.emit()
         """Remove segment at row (minimum 1 segment enforced).
         Refresh deferred for the same reason as _on_add_clicked.
         """

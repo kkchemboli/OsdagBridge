@@ -4069,3 +4069,98 @@ GENERATE_RESULTS_DEFAULTS = {
     },
 }
 
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# "Custom" parameters — used by the Additional Inputs pre-save validation
+# Every entry is a central KEY_* constant; display names are read from the schema.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Mode dropdown + value box: (parameter key, mode key, value key)
+CUSTOM_MODE_FIELDS = [
+    (KEY_LL_FOOTPATH_PRESSURE, KEY_LL_FOOTPATH_PRESSURE_MODE, KEY_LL_FOOTPATH_PRESSURE_VALUE),
+    (KEY_SL_DEAD_LOAD,         KEY_SL_DEAD_LOAD_MODE,         KEY_SL_DEAD_LOAD_VALUE),
+    (KEY_SL_LIVE_LOAD,         KEY_SL_LIVE_LOAD_MODE,         KEY_SL_LIVE_LOAD_VALUE),
+    (KEY_WL_GUST_FACTOR,       KEY_WL_GUST_FACTOR_MODE,       KEY_WL_GUST_FACTOR_VALUE),
+    (KEY_WL_DRAG_COEFF,        KEY_WL_DRAG_COEFF_MODE,        KEY_WL_DRAG_COEFF_VALUE),
+    (KEY_WL_DRAG_COEFF_LL,     KEY_WL_DRAG_COEFF_LL_MODE,     KEY_WL_DRAG_COEFF_LL_VALUE),
+    (KEY_WL_LIFT_COEFF,        KEY_WL_LIFT_COEFF_MODE,        KEY_WL_LIFT_COEFF_VALUE),
+    (KEY_WL_SUPER_AREA_ELEV,   KEY_WL_SUPER_AREA_ELEV_MODE,   KEY_WL_SUPER_AREA_ELEV_VALUE),
+    (KEY_WL_SUPER_AREA_PLAIN,  KEY_WL_SUPER_AREA_PLAIN_MODE,  KEY_WL_SUPER_AREA_PLAIN_VALUE),
+    (KEY_WL_EXPOSED_FRONTAL,   KEY_WL_EXPOSED_FRONTAL_MODE,   KEY_WL_EXPOSED_FRONTAL_VALUE),
+    (KEY_WL_WIND_ECC_DECK,     KEY_WL_WIND_ECC_DECK_MODE,     KEY_WL_WIND_ECC_DECK_VALUE),
+    (KEY_WL_WIND_LL_ECC,       KEY_WL_WIND_LL_ECC_MODE,       KEY_WL_WIND_LL_ECC_VALUE),
+    (KEY_DO_CAMBER,            KEY_DO_CAMBER_MODE,            KEY_DO_CAMBER_VALUE),
+]
+
+# Dropdown whose "Custom" option unlocks sibling boxes: (dropdown key, sub-tab key, [value keys])
+CUSTOM_TYPE_FIELDS = [
+    (KEY_CB_TYPE,      KEY_MP_CB_TAB, [KEY_CB_DENSITY, KEY_CB_WIDTH, KEY_CB_HEIGHT, KEY_CB_AREA, KEY_CB_LOAD]),
+    (KEY_MD_TYPE,      KEY_MD_TAB,    [KEY_MD_DENSITY, KEY_MD_WIDTH, KEY_MD_HEIGHT, KEY_MD_AREA, KEY_MD_LOAD]),
+    (KEY_RL_TYPE,      KEY_RL_TAB,    [KEY_RL_WIDTH, KEY_RL_HEIGHT]),
+    (KEY_RL_LOAD_MODE, KEY_RL_TAB,    [KEY_RL_LOAD_VALUE]),
+    (KEY_WC_MATERIAL,  KEY_WC_TAB,    [KEY_WC_DENSITY]),
+]
+
+# Girder dimensions typed by the user when the Design Type (KEY_DESIGN_MODE) is Custom.
+# Stored once per girder member as "<key>.G{n}.M{m}".
+CUSTOM_GIRDER_TEXT_FIELDS = [
+    KEY_MP_GIRDER_DEPTH,
+    KEY_MP_GIRDER_TOP_FLANGE_WIDTH,
+    KEY_MP_GIRDER_BOTTOM_FLANGE_WIDTH,
+]
+# Mirrors the top flange for a symmetric girder, so it is not a separate input there
+CUSTOM_GIRDER_SYMMETRIC_SKIP = [KEY_MP_GIRDER_BOTTOM_FLANGE_WIDTH]
+
+# All / Custom thickness dropdowns (Optimized mode); "Custom" needs a non-empty pick-list.
+# Stored per girder member as "<key>.G{n}.M{m}" with the list under "<key>.selected.G{n}.M{m}".
+CUSTOM_GIRDER_SELECT_FIELDS = [
+    KEY_MP_GIRDER_TOP_FLANGE_THICKNESS,
+    KEY_MP_GIRDER_BOTTOM_FLANGE_THICKNESS,
+    KEY_MP_GIRDER_WEB_THICKNESS,
+]
+
+
+# Dropdowns that only choose which girder/member is displayed. Picking another entry
+# is navigation, not an edit, so it never counts as an unsaved change.
+ADDITIONAL_INPUT_SELECTOR_KEYS = [
+    KEY_MP_GD_SELECT_GIRDER,
+    KEY_MP_GD_MEMBER_ID,
+    KEY_MP_STIFFENER_SELECT_MEMBER_ID,
+    KEY_MP_CB_SELECT_GIRDERS,
+    KEY_MP_ED_SELECT_GIRDERS,
+]
+
+
+def _schema_entry(key, node=ADDITIONAL_INPUTS_SCHEMA):
+    """First schema dict whose "id" is *key* (fields and sub-tabs alike)."""
+    if isinstance(node, dict):
+        if node.get("id") == key and node.get("label"):
+            return node
+        children = node.values()
+    elif isinstance(node, (list, tuple)):
+        children = node
+    else:
+        return None
+    for child in children:
+        found = _schema_entry(key, child)
+        if found is not None:
+            return found
+    return None
+
+
+def additional_input_label(key, tab_key=None) -> str:
+    """Display name of an Additional Inputs parameter, taken from the schema label.
+
+    HTML tags and the trailing colon are removed. *tab_key* prefixes the sub-tab
+    label, for names such as "Width (m)" that repeat across sub-tabs.
+    """
+    import re
+
+    def _clean(entry):
+        text = re.sub(r"<[^>]+>", "", str(entry.get("label", ""))) if entry else ""
+        return " ".join(text.split()).rstrip(":").strip()
+
+    name = _clean(_schema_entry(key)) or key
+    prefix = _clean(_schema_entry(tab_key)) if tab_key else ""
+    return f"{prefix} {name}".strip()
