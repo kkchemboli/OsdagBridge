@@ -324,6 +324,8 @@ DISP_TITLE_MATERIAL = "Material Inputs"
 KEY_DISP_GIRDER = "Girder"
 KEY_DISP_CROSS_BRACING = "Cross Bracing"
 KEY_DISP_END_DIAPHRAGM = "End Diaphragm"
+KEY_DISP_TRANSVERSE_MEMBER = "Transverse Member"
+KEY_DISP_MEMBER = "Member"
 KEY_DISP_DECK_CONCRETE_GRADE = "Deck"
 
 # Sample values

@@ -40,6 +40,8 @@ from osdagbridge.core.utils.common import (
     KEY_UTIL_DEFLECTION_CRACK, KEY_ANALYSIS_LOAD_COMBINATION,
     KEY_OUTPUT_DOCK_MEMBER_ID, KEY_OUTPUT_DOCK_LOAD_COMBINATION,
     KEY_TS_NO_OF_GIRDERS,
+    KEY_ANALYSIS_MEMBER,
+    VALUE_ANALYSIS_MEMBER_ALL,
 )
 from osdagbridge.desktop.ui.utils.custom_buttons import DockCustomButton
 from osdagbridge.desktop.ui.docks.dock_utils import apply_field_style
@@ -794,6 +796,15 @@ class OutputDock(QWidget):
                 combo.clear()
                 combo.blockSignals(False)
 
+        # The analysis Member list is specific to the analysed grillage
+        # (G1..Gn, ED1/ED2, CB1..CBk); go back to the single default entry.
+        combo = self._w(KEY_ANALYSIS_MEMBER)
+        if combo is not None:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(VALUE_ANALYSIS_MEMBER_ALL)
+            combo.blockSignals(False)
+
     def refresh_loadcase_dropdowns(self):
         """Populate both Load Case dropdowns with real load cases after design completes."""
         if not self.backend or not hasattr(self.backend, "get_available_loadcases"):
@@ -857,18 +868,36 @@ class OutputDock(QWidget):
             combo_design.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             combo_design.blockSignals(False)
 
-        # 2. Update Analysis Member dropdown
-        from osdagbridge.core.utils.common import KEY_ANALYSIS_MEMBER
+        # 2. Update Analysis Member dropdown: girders, then transverse members
         combo_analysis = self._w(KEY_ANALYSIS_MEMBER)
         if combo_analysis is not None:
             combo_analysis.blockSignals(True)
             combo_analysis.clear()
-            combo_analysis.addItems(["All"] + items)
+            combo_analysis.addItems([VALUE_ANALYSIS_MEMBER_ALL] + items)
+            self._add_transverse_member_items(combo_analysis)
             combo_analysis.setCurrentIndex(0)
             combo_analysis.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo_analysis.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             combo_analysis.blockSignals(False)
    
+    def _add_transverse_member_items(self, combo):
+        """Append the transverse members (ED1, CB1..CBk, ED2) to the analysis
+        Member dropdown, one entry each, after the girders.
+
+        The entries come from the backend's member map (results_data), so the
+        list always matches the analysed grillage. Each entry carries its id as
+        item data — that id is what the plot widget passes to results_data.
+        """
+        get_map = getattr(self.backend, "get_member_map", None)
+        lines = (get_map() if get_map else {}).get("transverse") or []
+        if not lines:
+            return
+
+        combo.insertSeparator(combo.count())
+        for line in lines:
+            combo.addItem(line["id"], line["id"])
+            combo.setItemData(combo.count() - 1, f"x = {line['x']:.2f} m", Qt.ToolTipRole)
+
     def connect_design_dropdowns(self):
         """Connect Member and Load Case dropdowns to refresh DCR bars on change."""
         for key in (KEY_OUTPUT_DOCK_MEMBER_ID, KEY_OUTPUT_DOCK_LOAD_COMBINATION):
