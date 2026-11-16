@@ -137,6 +137,17 @@ KEY_ANALYSIS_FORCES           = "analysis.forces"
 KEY_ANALYSIS_DISPLAY_OPTIONS  = "analysis.display_options"
 KEY_ANALYSIS_UTILIZATION      = "analysis.utilization"
 
+# Entries of the analysis "Member" dropdown (KEY_ANALYSIS_MEMBER): "All" (every
+# girder and every transverse member), then the generated girder entries
+# G1..Gn, then one entry per transverse member, named with these prefixes.
+VALUE_ANALYSIS_MEMBER_ALL             = "All"              # all girders + transverse members
+PREFIX_ANALYSIS_END_DIAPHRAGM         = "ED"               # ED1 (start), ED2 (end)
+PREFIX_ANALYSIS_CROSS_BRACING         = "CB"               # CB1..CBk, ascending along the span
+
+# Kinds of transverse member line in result_data["member_map"]
+MEMBER_KIND_END_DIAPHRAGM = "end_diaphragm"
+MEMBER_KIND_CROSS_BRACING = "cross_bracing"
+
 KEY_STEELDESIGN_MEMBER_ID = "steeldesign.member_id"
 KEY_STEELDESIGN_LOAD_COMBINATION = "steeldesign.load_combination"
 
