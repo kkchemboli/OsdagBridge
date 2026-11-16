@@ -3910,6 +3910,13 @@ class PlateGirderBridge:
         """Return (nodes, members) dicts built from the active openseespy model."""
         return build_nodes_members()
 
+    def get_member_map(self) -> dict:
+        """Return the longitudinal / transverse element map built by results_data.
+
+        Empty until design() has run. See results_data.build_member_map().
+        """
+        return (self.result_data or {}).get("member_map") or {}
+
     def get_edge_dist(self) -> float:
         """Return the deck overhang distance (0.0 when no overhang)."""
         return self.output_dict.get(KEY_TS_DECK_OVERHANG) or 0.0

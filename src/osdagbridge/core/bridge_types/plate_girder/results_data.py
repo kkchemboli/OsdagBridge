@@ -14,7 +14,15 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from pathlib import Path
 
+import numpy as np
 import openseespy.opensees as ops
+
+from osdagbridge.core.utils.common import (
+    MEMBER_KIND_CROSS_BRACING,
+    MEMBER_KIND_END_DIAPHRAGM,
+    PREFIX_ANALYSIS_CROSS_BRACING,
+    PREFIX_ANALYSIS_END_DIAPHRAGM,
+)
 
 from .results_data_post_processing import post_process, FORCE_KEEP, DISP_KEEP
 
@@ -427,6 +435,7 @@ def _build_full_data(model, edge_dist: float = 0.0, dataset=None, lazy: bool = F
         "groups": groups,
         "longitudinal_members": longitudinal_members,
         "transverse_members": transverse_members,
+        "member_map": build_member_map(model, nodes, members, edge_dist=edge_dist),
         "edge_dist": float(edge_dist),
         "loadcases": list(loadcases),
         "force_components": force_components,
@@ -507,6 +516,360 @@ def _build_full_data(model, edge_dist: float = 0.0, dataset=None, lazy: bool = F
             }
 
     return data
+
+
+# =============================================================================
+# MEMBER MAP — longitudinal / transverse element mapping
+# =============================================================================
+#
+# ospgrillage tags every beam element with the grid line it belongs to:
+#   longitudinal lines  -> "edge_beam", "exterior_main_beam_1/2", "interior_main_beam"
+#   transverse lines    -> "start_edge", "end_edge" (the two end lines) and
+#                          "transverse_slab" (every line in between)
+# build_member_map() turns that into one explicit map so that no consumer has
+# to re-derive "is this element longitudinal or transverse?" from coordinates.
+
+# ospgrillage member names whose elements run across the bridge width.
+_TRANSVERSE_END_GROUPS = ("start_edge", "end_edge")
+_TRANSVERSE_GROUPS = _TRANSVERSE_END_GROUPS + ("transverse_slab",)
+
+_COORD_TOL = 1e-6
+
+
+def _transverse_group_tags(model, group_name: str) -> set[int]:
+    """Element tags of one ospgrillage transverse member group.
+
+    Raises RuntimeError when the group cannot be read: the member map has no
+    other source for which elements are transverse.
+    """
+    try:
+        return {int(e) for e in model.get_element(member=group_name, options="elements")}
+    except Exception as exc:
+        raise RuntimeError(
+            f"build_member_map: could not read the ospgrillage member group "
+            f"'{group_name}' from the grillage model: {exc}"
+        ) from exc
+
+
+def build_member_map(model, nodes: dict, members: dict, edge_dist: float = 0.0) -> dict:
+    """
+    Map every beam element to its orientation and group the transverse ones
+    into member lines (end diaphragms and cross bracings).
+
+    Parameters
+    ----------
+    model : OspGrillage
+        Analysed grillage model. Its member groups ("start_edge", "end_edge",
+        "transverse_slab") are the only source of which elements are
+        transverse; every other element is longitudinal.
+    nodes, members : dict
+        ``{node: [x, y, z]}`` and ``{element: [n_i, n_j]}`` with int keys.
+    edge_dist : float
+        Deck overhang (m). When > 0 the outermost longitudinal lines are edge
+        beams and the transverse stubs reaching them are deck cantilever, not
+        part of a diaphragm / bracing, so they are left out of the lines.
+
+    Returns
+    -------
+    dict::
+
+        {
+          "element_orientation": {tag: "L" | "T"},   # every element, once
+          "transverse": [                            # ascending along the span
+            {"id": "ED1", "kind": "end_diaphragm", "x": 0.0,
+             "elements": [...],                      # ordered across the width
+             "nodes":    [...]},                     # len(elements) + 1
+            {"id": "CB1", "kind": "cross_bracing", ...},
+            ...
+            {"id": "ED2", "kind": "end_diaphragm", ...},
+          ],
+        }
+
+    Raises
+    ------
+    RuntimeError
+        When there is no model, a transverse member group cannot be read, or
+        the model has no end lines ("start_edge" / "end_edge" empty).
+    """
+    if model is None:
+        raise RuntimeError("build_member_map: no grillage model to read member groups from")
+
+    tags = [t for t, (n1, n2) in members.items() if n1 in nodes and n2 in nodes]
+    tag_set = set(tags)
+
+    # ── 1. Orientation, from the ospgrillage member groups ─────────────────
+    group_tags = {group: _transverse_group_tags(model, group) & tag_set
+                  for group in _TRANSVERSE_GROUPS}
+    end_tags = set().union(*(group_tags[g] for g in _TRANSVERSE_END_GROUPS))
+    for group in _TRANSVERSE_END_GROUPS:
+        if not group_tags[group]:
+            raise RuntimeError(
+                f"build_member_map: the ospgrillage member group '{group}' has no "
+                "elements in the model; the end diaphragms cannot be identified"
+            )
+    tagged_transverse = set().union(*group_tags.values())
+
+    orientation = {int(t): ("T" if t in tagged_transverse else "L") for t in tags}
+
+    transverse = [t for t in tags if orientation[t] == "T"]
+    longitudinal = [t for t in tags if orientation[t] == "L"]
+
+    # ── 2. Drop the overhang stubs (transverse elements touching an edge beam)
+    if edge_dist and edge_dist > 0 and longitudinal:
+        long_z = [nodes[n][2] for t in longitudinal for n in members[t]]
+        z_min, z_max = min(long_z), max(long_z)
+        tol = 1e-3
+        edge_nodes = {
+            n for t in longitudinal for n in members[t]
+            if abs(nodes[n][2] - z_min) < tol or abs(nodes[n][2] - z_max) < tol
+        }
+        transverse = [t for t in transverse
+                      if not (set(members[t]) & edge_nodes)]
+
+    # ── 3. Chain the transverse elements into lines across the width ───────
+    node_to_elems: dict[int, list[int]] = {}
+    for t in transverse:
+        for n in members[t]:
+            node_to_elems.setdefault(n, []).append(t)
+
+    lines = []
+    seen: set[int] = set()
+    for start in transverse:
+        if start in seen:
+            continue
+        component, stack = [], [start]
+        seen.add(start)
+        while stack:
+            cur = stack.pop()
+            component.append(cur)
+            for n in members[cur]:
+                for nxt in node_to_elems[n]:
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+
+        def _mid_z(tag):
+            n1, n2 = members[tag]
+            return (nodes[n1][2] + nodes[n2][2]) / 2.0
+
+        component.sort(key=_mid_z)
+        line_nodes = []
+        for tag in component:
+            a, b = sorted(members[tag], key=lambda n: nodes[n][2])
+            if not line_nodes:
+                line_nodes.append(int(a))
+            line_nodes.append(int(b))
+        lines.append({
+            "elements": [int(t) for t in component],
+            "nodes": line_nodes,
+            "x": float(nodes[line_nodes[0]][0]),
+            "is_end": set(component) <= end_tags,
+        })
+
+    lines.sort(key=lambda ln: (ln["x"], ln["nodes"][0]))
+
+    n_end = n_cb = 0
+    transverse_lines = []
+    for ln in lines:
+        if ln["is_end"]:
+            n_end += 1
+            member_id, kind = f"{PREFIX_ANALYSIS_END_DIAPHRAGM}{n_end}", MEMBER_KIND_END_DIAPHRAGM
+        else:
+            n_cb += 1
+            member_id, kind = f"{PREFIX_ANALYSIS_CROSS_BRACING}{n_cb}", MEMBER_KIND_CROSS_BRACING
+        transverse_lines.append({
+            "id": member_id,
+            "kind": kind,
+            "x": ln["x"],
+            "elements": ln["elements"],
+            "nodes": ln["nodes"],
+        })
+
+    return {
+        "element_orientation": orientation,
+        "transverse": transverse_lines,
+    }
+
+
+def select_transverse_lines(member_map: dict | None, selection: str) -> list[dict]:
+    """
+    Resolve a Member-dropdown selection to its transverse member line.
+
+    ``selection`` is a transverse member id ("ED1", "CB3"). Returns [] for
+    anything else (e.g. a girder name or "All"), which is how callers tell a
+    transverse selection from a longitudinal one.
+    """
+    lines = (member_map or {}).get("transverse") or []
+    return [ln for ln in lines if ln["id"] == selection]
+
+
+# =============================================================================
+# MEMBER-LINE RESULTS — forces in member axes, displacements at the nodes
+# =============================================================================
+#
+# The dataset stores element END forces in GLOBAL axes (X along the span,
+# Y vertical, Z across the width). For a girder (along X) global and member
+# axes coincide, which is why girder plots can use the components directly.
+# A transverse member runs along Z (or obliquely on a skew bridge), so its
+# axial force, shears, torsion and bending moments have to be obtained by
+# rotating the end forces about the vertical axis into the member's own axes:
+#
+#     x' along the member (c, 0, s),  y' = Y,  z' = x' × y' = (-s, 0, c)
+#
+#     axial  Fx' =  c·Vx + s·Vz        torsion Mx' =  c·Mx + s·Mz
+#     shear  Fy' =  Vy                 bending My' =  My
+#     shear  Fz' = -s·Vx + c·Vz        bending Mz' = -s·Mx + c·Mz
+#
+# with (c, s) = (dx, dz) / plan length. For a girder (c, s) = (1, 0) this is
+# the identity.
+
+# plot key -> (vector, index into the rotated (x', y', z') triple)
+_MEMBER_FORCE_KEYS = {
+    "Fx": ("V", 0), "Fy": ("V", 1), "Fz": ("V", 2),
+    "Mx": ("M", 0), "My": ("M", 1), "Mz": ("M", 2),
+}
+
+# plot key -> displacement component in the dataset
+_MEMBER_DISP_KEYS = {"Dx": "x", "Dy": "y", "Dz": "z"}
+
+
+def _loadcase_indices(ds_all, names) -> list[int]:
+    """Positional index of the first occurrence of each load case name."""
+    first: dict[str, int] = {}
+    for i, lc in enumerate(ds_all.coords["Loadcase"].values):
+        first.setdefault(str(lc), i)
+    return [first[str(n)] for n in names if str(n) in first]
+
+
+def _line_geometry(line: dict, nodes: dict, members: dict) -> dict:
+    """Per-element start/end nodes (in line order), coordinates and plan direction."""
+    start_nodes, end_nodes, reversed_flags = [], [], []
+    for k, tag in enumerate(line["elements"]):
+        a, b = line["nodes"][k], line["nodes"][k + 1]
+        start_nodes.append(a)
+        end_nodes.append(b)
+        # ospgrillage builds transverse elements i -> j across the width, but
+        # do not rely on it: read the i/j ends according to the line order.
+        reversed_flags.append(tuple(members[tag]) == (b, a))
+    xa = np.array([nodes[n][0] for n in start_nodes], dtype=float)
+    za = np.array([nodes[n][2] for n in start_nodes], dtype=float)
+    xb = np.array([nodes[n][0] for n in end_nodes], dtype=float)
+    zb = np.array([nodes[n][2] for n in end_nodes], dtype=float)
+    length = np.hypot(xb - xa, zb - za)
+    length = np.where(length < _COORD_TOL, 1.0, length)
+    return {
+        "start_nodes": start_nodes, "end_nodes": end_nodes,
+        "reversed": np.array(reversed_flags, dtype=bool),
+        "xa": xa, "za": za, "xb": xb, "zb": zb,
+        "c": (xb - xa) / length, "s": (zb - za) / length,
+    }
+
+
+def member_line_forces(ds_all, loadcase: str, line: dict, nodes: dict,
+                       members: dict, force_key: str) -> dict:
+    """
+    Internal force along a transverse member line, in member axes.
+
+    Parameters
+    ----------
+    ds_all : xarray.Dataset
+        Results for all load cases (``forces`` in N / N·m, global axes).
+    loadcase : str
+        Load case / combination to read, as stored in the dataset (the
+        "Envelope ULS" / "Envelope SLS" rows are read like any other).
+    line : dict
+        One entry of ``member_map["transverse"]``.
+    force_key : str
+        "Fx" (axial), "Fy" / "Fz" (shear), "Mx" (torsion), "My" / "Mz" (bending).
+
+    Returns
+    -------
+    dict with one entry per element, in line order::
+
+        {"start_nodes", "end_nodes",           # node tags
+         "xa", "za", "xb", "zb",               # plan coordinates (m)
+         "val_a", "val_b"}                     # kN or kNm
+
+    ``val_a`` / ``val_b`` are the internal force at the start and end of each
+    element in one consistent sign convention (the end-force at the start node;
+    minus the end-force at the end node), so the diagram is continuous along an
+    element and shows the true jump where the line crosses a girder.
+    """
+    vector, axis = _MEMBER_FORCE_KEYS[force_key]
+    geom = _line_geometry(line, nodes, members)
+
+    lc_idx = _loadcase_indices(ds_all, [loadcase])
+    if not lc_idx:
+        raise KeyError(f"Load case '{loadcase}' not found in the results dataset")
+
+    comps = [f"{vector}{ax}_{end}" for end in ("i", "j") for ax in ("x", "y", "z")]
+    arr = np.asarray(
+        ds_all["forces"].isel(Loadcase=lc_idx[0])
+        .sel(Element=line["elements"], Component=comps).values,
+        dtype=float,
+    )                                       # (n_elem, 6): i-xyz, j-xyz
+    end_i, end_j = arr[:, 0:3], arr[:, 3:6]
+    rev = geom["reversed"][:, None]
+    at_a = np.where(rev, end_j, end_i)      # end force at the line-start node
+    at_b = np.where(rev, end_i, end_j)      # end force at the line-end node
+
+    def _rotate(v):
+        c, s = geom["c"], geom["s"]
+        x, y, z = v[:, 0], v[:, 1], v[:, 2]
+        return (c * x + s * z, y, -s * x + c * z)[axis]
+
+    val_a = _rotate(at_a) / 1000.0          # N -> kN, N·m -> kNm
+    val_b = -_rotate(at_b) / 1000.0         # end force at b -> internal force
+
+    return {
+        "start_nodes": geom["start_nodes"], "end_nodes": geom["end_nodes"],
+        "xa": geom["xa"], "za": geom["za"], "xb": geom["xb"], "zb": geom["zb"],
+        "val_a": val_a, "val_b": val_b,
+    }
+
+
+def nodal_displacements_mm(ds_lc, disp_key: str) -> dict:
+    """
+    ``{node: displacement in mm}`` for one load case slice.
+
+    ``disp_key`` is "Dx", "Dy" or "Dz" (global axes). The vertical / lateral
+    components are sign-flipped so that sag plots on the same side as in the
+    girder deflection diagram.
+    """
+    target = _MEMBER_DISP_KEYS[disp_key]
+    da = ds_lc["displacements"]
+    comp = next((c for c in da.coords["Component"].values
+                 if str(c).lower() == target), None)
+    if comp is None:
+        raise KeyError(f"Displacement component '{target}' not found in the dataset")
+    sel = da.sel(Component=comp)
+    sign = -1.0 if target in ("y", "z") else 1.0
+    return {
+        int(n): sign * float(v) * 1000.0
+        for n, v in zip(sel.coords["Node"].values, np.asarray(sel.values, dtype=float))
+    }
+
+
+def member_line_displacements(ds_all, loadcase: str, line: dict, nodes: dict,
+                              members: dict, disp_key: str) -> dict:
+    """
+    Displacement along a transverse member line (mm, global component).
+
+    Same return layout as ``member_line_forces`` so both can be drawn by the
+    same code; ``val_a`` / ``val_b`` are the nodal values at each element's
+    start and end.
+    """
+    lc_idx = _loadcase_indices(ds_all, [loadcase])
+    if not lc_idx:
+        raise KeyError(f"Load case '{loadcase}' not found in the results dataset")
+    disp = nodal_displacements_mm(ds_all.isel(Loadcase=lc_idx[0]), disp_key)
+    geom = _line_geometry(line, nodes, members)
+    return {
+        "start_nodes": geom["start_nodes"], "end_nodes": geom["end_nodes"],
+        "xa": geom["xa"], "za": geom["za"], "xb": geom["xb"], "zb": geom["zb"],
+        "val_a": np.array([disp.get(n, 0.0) for n in geom["start_nodes"]]),
+        "val_b": np.array([disp.get(n, 0.0) for n in geom["end_nodes"]]),
+    }
 
 
 def _dump_crossbracing(data: dict) -> None:
