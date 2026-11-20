@@ -160,10 +160,24 @@ def test_escape_cancels_and_unchanged_value_is_not_emitted(dual):
     assert got == []
 
 
-def test_preview_canvas_stays_read_only(qapp_instance):
+def test_preview_canvas_ignores_a_double_click_on_a_label(qapp_instance):
+    """The cross-section copy inside Additional Inputs must stay read-only."""
     from osdagbridge.desktop.ui.docks.cad_cross_section import CrossSectionCADWidget
     preview = CrossSectionCADWidget()
-    assert preview.interactive_edit is False
+    preview.resize(1000, 600)
+    preview.show()
+    qapp_instance.processEvents()
+    preview.update_params({"carriageway_width": 9000})
+    preview.grab()                                         # paint -> registers the label zones
+    got = []
+    preview.dimension_edit_requested.connect(lambda k, t: got.append((k, t)))
+    rect = _zone(preview, KEY_TS_DECK_THICKNESS)
+    assert rect is not None
+
+    _double_click(preview, rect)
+
+    assert preview._dim_editor is None and got == []
+    preview.close()
 
 
 def test_click_outside_the_editor_commits(dual):
@@ -182,15 +196,20 @@ def test_click_outside_the_editor_commits(dual):
     assert cross._dim_editor is None
 
 
-def test_click_outside_on_another_canvas_commits(dual):
-    from PySide6.QtCore import QPoint, Qt
+def test_leaving_the_editor_with_tab_commits(dual):
+    """Focus leaving the editor without a mouse click (Tab) also applies the value."""
+    from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
-    cross, top = dual.cross_section_widget, dual.top_view_widget
+    cross = dual.cross_section_widget
     got = []
     dual.dimension_edit_requested.connect(lambda k, t: got.append((k, t)))
     _double_click(cross, _zone(cross, KEY_TS_DECK_THICKNESS))
     editor = cross._dim_editor
     editor.selectAll()
     QTest.keyClicks(editor, "330")
-    QTest.mouseClick(top, Qt.LeftButton, Qt.NoModifier, QPoint(5, 5))
+
+    QTest.keyClick(editor, Qt.Key_Tab)
+
+    assert not editor.hasFocus()
     assert got == [(KEY_TS_DECK_THICKNESS, "330")]
+    assert cross._dim_editor is None
