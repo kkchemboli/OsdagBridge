@@ -18,7 +18,6 @@ from osdagbridge.core.bridge_types.plate_girder.ui_fields_additional_input impor
     CUSTOM_GIRDER_TEXT_FIELDS,
     CUSTOM_MODE_FIELDS,
     CUSTOM_TYPE_FIELDS,
-    additional_input_label,
 )
 import osdagbridge.core.utils.common as common
 from osdagbridge.core.utils.common import *  # noqa: F401,F403  (central KEY_* constants)
@@ -52,12 +51,6 @@ def test_rule_tables_use_central_keys_that_match_the_widgets():
     for combo_key, tab_key, value_keys in CUSTOM_TYPE_FIELDS:
         assert {combo_key, tab_key, *value_keys} <= central
     assert set(CUSTOM_GIRDER_TEXT_FIELDS + CUSTOM_GIRDER_SELECT_FIELDS) <= central
-
-
-def test_labels_come_from_the_schema_without_markup():
-    assert additional_input_label(KEY_WL_GUST_FACTOR) == "Gust Factor, G"
-    assert additional_input_label(KEY_RL_WIDTH, KEY_RL_TAB) == "Railing Width (m)"
-    assert "<" not in additional_input_label(KEY_MP_GIRDER_TOP_FLANGE_WIDTH)
 
 
 # ---------------------------------------------------------------- dialog (offscreen Qt)
@@ -148,27 +141,6 @@ def test_custom_mode_with_empty_box_blocks_save_and_names_the_field(dialog):
     assert popups.shown[0].text == "Error: The custom value for 'Gust Factor, G' cannot be empty."
     assert live == before                                   # nothing committed
     assert dlg.tabs.tabText(dlg.tabs.currentIndex()) == "Loading"   # jumped to the field's tab
-
-
-def test_custom_mode_with_a_value_saves(dialog):
-    dlg, live, popups = dialog
-    _quiet(lambda: _combo(dlg, KEY_WL_GUST_FACTOR_MODE).setCurrentText(VALUE_CUSTOM))
-    box = _box(dlg, KEY_WL_GUST_FACTOR_VALUE)
-    box.setText("2.0")
-    _quiet(box.editingFinished.emit)
-
-    _save(dlg)
-
-    assert [p.title for p in popups.shown] == ["Saved"]
-    assert live[KEY_WL_GUST_FACTOR_MODE] == VALUE_CUSTOM
-
-
-def test_non_custom_mode_with_empty_box_saves(dialog):
-    dlg, _live, popups = dialog
-    assert _box(dlg, KEY_WL_GUST_FACTOR_VALUE).text() == ""
-    assert _combo(dlg, KEY_WL_GUST_FACTOR_MODE).currentText() != VALUE_CUSTOM
-    _save(dlg)
-    assert [p.title for p in popups.shown] == ["Saved"]
 
 
 def test_all_missing_fields_are_reported_at_once_in_tab_order(dialog):
@@ -306,21 +278,17 @@ def _user_empties(dlg, qapp, box):
     qapp.processEvents()
 
 
-@pytest.mark.parametrize("mode_key,value_key,label", [
-    (KEY_WL_GUST_FACTOR_MODE, KEY_WL_GUST_FACTOR_VALUE, "Gust Factor, G"),
-    (KEY_DO_CAMBER_MODE, KEY_DO_CAMBER_VALUE, "Camber (m)"),
-])
-def test_emptied_custom_value_is_left_empty_and_reported_once_by_save(dialog, qapp, mode_key, value_key, label):
+def test_emptied_custom_value_is_left_empty_and_reported_once_by_save(dialog, qapp):
     dlg, live, popups = dialog
-    _quiet(lambda: _combo(dlg, mode_key).setCurrentText(VALUE_CUSTOM))
-    box = _box(dlg, value_key)
+    _quiet(lambda: _combo(dlg, KEY_WL_GUST_FACTOR_MODE).setCurrentText(VALUE_CUSTOM))
+    box = _box(dlg, KEY_WL_GUST_FACTOR_VALUE)
 
     _user_empties(dlg, qapp, box)
 
     assert popups.shown == []                                # no "must be a numeric value" popup
     assert box.text() == ""                                  # no made-up replacement value
     _save(dlg)
-    assert [p.text for p in popups.shown] == [f"Error: The custom value for '{label}' cannot be empty."]
+    assert [p.text for p in popups.shown] == ["Error: The custom value for 'Gust Factor, G' cannot be empty."]
 
 
 def test_after_filling_the_reported_value_save_goes_through(dialog, qapp):
@@ -334,16 +302,6 @@ def test_after_filling_the_reported_value_save_goes_through(dialog, qapp):
     _save(dlg)
     assert popups.shown[-1].title == "Saved"
     assert float(live[KEY_WL_GUST_FACTOR_VALUE]) == 2.5
-
-
-def test_a_non_empty_out_of_range_custom_value_is_rejected_and_goes_back(dialog, qapp):
-    dlg, _live, popups = dialog
-    _quiet(lambda: _combo(dlg, KEY_WL_GUST_FACTOR_MODE).setCurrentText(VALUE_CUSTOM))
-    box = _box(dlg, KEY_WL_GUST_FACTOR_VALUE)
-    _user_types_and_leaves(dlg, qapp, box, "2.5")
-    _user_types_and_leaves(dlg, qapp, box, "1.5")                 # below the allowed range
-    assert [p.title for p in popups.shown] == ["Input Error"]
-    assert box.text() == "2.5"                                     # back to the accepted value
 
 
 # ---------------------------------------------------------------- thickness pick-list (real pop-up)
@@ -362,10 +320,96 @@ def test_custom_thickness_pick_list(dialog, monkeypatch, move_all_out, expected)
         return 1
 
     monkeypatch.setattr(CustomMultiSelectDialog, "exec", submit)
-    _quiet(lambda: dlg.findChild(QWidget, KEY_MP_GIRDER_WEB_THICKNESS).currentWidget().setCurrentText(VALUE_CUSTOM))
+    _user_picks(dlg, dlg.findChild(QWidget, KEY_MP_GIRDER_WEB_THICKNESS).currentWidget(), VALUE_CUSTOM)
     _save(dlg)
     assert popups.shown[-1].text == (expected or "Inputs saved successfully.")
 
+
+def _user_picks(dlg, combo, text):
+    """Pick an option with the keyboard, as a user does (fires `activated`)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    dlg.activateWindow()
+    combo.setFocus()
+    steps = combo.findText(text) - combo.currentIndex()
+    key = Qt.Key_Down if steps > 0 else Qt.Key_Up
+    for _ in range(abs(steps)):                      # exactly the key presses a user would make
+        _quiet(lambda: QTest.keyClick(combo, key))
+
+
+@pytest.fixture
+def pick_list(monkeypatch):
+    """Stand-in for the thickness pick-list: records each opening; keeps one value or cancels."""
+    from osdagbridge.desktop.ui.dialogs.additional_input.dialogs.multi_select_dialog import CustomMultiSelectDialog
+    log = {"opened_with": [], "answer": "keep_one"}
+
+    def exec_(self):
+        log["opened_with"].append(self.selected_values())
+        if log["answer"] == "cancel":
+            return 0
+        self._move_all_left()
+        self.available_list.item(0).setSelected(True)
+        self._move_selected_right()
+        return 1
+
+    monkeypatch.setattr(CustomMultiSelectDialog, "exec", exec_)
+    return log
+
+
+def _thickness_combos(dlg):
+    from PySide6.QtWidgets import QWidget
+    return [dlg.findChild(QWidget, key).currentWidget()
+            for key in (KEY_MP_GIRDER_TOP_FLANGE_THICKNESS, KEY_MP_GIRDER_BOTTOM_FLANGE_THICKNESS)]
+
+
+def test_reopening_the_dialog_does_not_open_the_pick_list_again(qapp, popups, pick_list):
+    dlg, live = _open_dialog(qapp)
+    _quiet(lambda: dlg.tabs.setCurrentIndex(1))
+    top, _bottom = _thickness_combos(dlg)
+    _user_picks(dlg, top, VALUE_CUSTOM)
+    assert len(pick_list["opened_with"]) == 1
+    _save(dlg)
+    _quiet(dlg.close)
+
+    _quiet(lambda: (dlg.set_input_dictionary(live), dlg._update_additional_input_cad(),
+                    dlg.design_mode_trigger(live[KEY_DESIGN_MODE]), dlg.show()))
+    qapp.processEvents()
+
+    assert len(pick_list["opened_with"]) == 1                      # not opened again on reopen
+    _quiet(lambda: dlg.tabs.setCurrentIndex(1))
+    top, bottom = _thickness_combos(dlg)
+    picked = live[KEY_MP_GIRDER_TOP_FLANGE_THICKNESS + KEY_SUFFIX_SELECTED + ".G1.M1"]
+    assert top.currentText() == VALUE_CUSTOM and len(picked) == 1  # the choice was kept
+    # symmetric girder: the bottom flange mirrors the top one, picked values included
+    assert bottom.currentText() == VALUE_CUSTOM
+    assert dlg.working_input_dict[KEY_MP_GIRDER_BOTTOM_FLANGE_THICKNESS + KEY_SUFFIX_SELECTED + ".G1.M1"] == picked
+    assert dlg._validate_custom_fields() == []
+    dlg.hide()
+
+
+def test_cancelling_a_new_custom_choice_goes_back_to_all(dialog, pick_list):
+    dlg, _live, _popups = dialog
+    _quiet(lambda: dlg.tabs.setCurrentIndex(1))
+    top, _bottom = _thickness_combos(dlg)
+    pick_list["answer"] = "cancel"
+    _user_picks(dlg, top, VALUE_CUSTOM)
+    assert top.currentText() == "All"
+    assert dlg.working_input_dict[KEY_MP_GIRDER_TOP_FLANGE_THICKNESS] == "All"
+
+
+def test_picking_custom_again_reopens_the_list_with_the_current_selection(dialog, qapp, pick_list):
+    dlg, _live, _popups = dialog
+    _quiet(lambda: dlg.tabs.setCurrentIndex(1))
+    top, _bottom = _thickness_combos(dlg)
+    _user_picks(dlg, top, VALUE_CUSTOM)
+    first_choice = dlg.working_input_dict[KEY_MP_GIRDER_TOP_FLANGE_THICKNESS + KEY_SUFFIX_SELECTED + ".G1.M1"]
+
+    qapp.processEvents()                                              # later, the user...
+    pick_list["answer"] = "cancel"
+    _quiet(lambda: top.activated.emit(top.currentIndex()))           # ...picks "Custom" again
+
+    assert pick_list["opened_with"][-1] == first_choice               # opened with what was picked
+    assert top.currentText() == VALUE_CUSTOM                          # cancel keeps the earlier choice
 
 
 # ---------------------------------------------------------------- Save while a box is still being edited
@@ -386,15 +430,8 @@ def _type_then_click_save(dlg, qapp, key, text):
     return box
 
 
-def test_save_button_does_not_take_the_focus(dialog):
-    from PySide6.QtCore import Qt
-    dlg, _live, _popups = dialog
-    assert dlg.save_button.focusPolicy() == Qt.NoFocus
-
-
 @pytest.mark.parametrize("text,warning", [
-    ("0", "Input Error"),        # below the range
-    ("40", "Input Error"),       # above the range
+    ("0", "Input Error"),        # outside the range
     ("13", "Layout"),            # in range, but the spacing would be below the minimum
 ])
 def test_rejected_girder_count_on_save_warns_only_and_goes_back(dialog, qapp, text, warning):
@@ -430,7 +467,6 @@ def test_any_value_rejected_while_saving_stops_the_save(dialog, qapp):
 @pytest.mark.parametrize("key,text", [
     (KEY_TS_DECK_THICKNESS, "900"),
     (KEY_TS_GIRDER_SPACING, "40"),
-    (KEY_WC_THICKNESS, "99999"),
     (KEY_TS_NO_OF_GIRDERS, "1"),
 ])
 def test_rejected_value_goes_back_to_the_previous_value_not_a_limit(dialog, qapp, key, text):

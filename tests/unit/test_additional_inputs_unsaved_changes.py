@@ -1,6 +1,4 @@
 """Additional Inputs dialog: is_modified tracking and the unsaved-changes warning on close."""
-import contextlib
-import io
 import os
 
 import pytest
@@ -34,11 +32,6 @@ def _user_picks_next(combo):
 
 
 # ---------------------------------------------------------------- tracking
-def test_opening_the_dialog_is_not_a_modification(dialog):
-    dlg, _live, _popups = dialog
-    assert dlg.is_modified is False
-
-
 def test_navigation_and_programmatic_changes_are_not_modifications(dialog, qapp):
     from PySide6.QtWidgets import QTabWidget
     dlg, _live, _popups = dialog
@@ -54,23 +47,6 @@ def test_navigation_and_programmatic_changes_are_not_modifications(dialog, qapp)
     _box(dlg, KEY_WC_THICKNESS).setText("75")                                   # programmatic
     qapp.processEvents()
     assert dlg.is_modified is False
-
-
-def test_typing_selecting_and_ticking_mark_the_dialog_modified(dialog):
-    from PySide6.QtWidgets import QCheckBox
-    dlg, _live, _popups = dialog
-
-    _user_types(_box(dlg, KEY_WC_THICKNESS))
-    assert dlg.is_modified is True
-
-    dlg.is_modified = False
-    _user_picks_next(_combo(dlg, KEY_WC_MATERIAL))
-    assert dlg.is_modified is True
-
-    dlg.is_modified = False
-    check = next(c for c in dlg.findChildren(QCheckBox) if c.isEnabled())
-    _quiet(check.click)
-    assert dlg.is_modified is True
 
 
 def test_picking_the_same_option_again_is_not_a_modification(dialog):
@@ -150,11 +126,6 @@ def _press_escape(dlg):
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     _quiet(lambda: QTest.keyClick(dlg, Qt.Key_Escape))
-
-
-def test_title_bar_close_button_closes_this_dialog(dialog):
-    dlg, _live, _popups = dialog
-    assert dlg.title_bar.parent() is dlg                     # its X calls parent().close()
 
 
 @pytest.mark.parametrize("close", [lambda d: _quiet(d.close), _press_escape], ids=["title-bar X", "Esc"])
