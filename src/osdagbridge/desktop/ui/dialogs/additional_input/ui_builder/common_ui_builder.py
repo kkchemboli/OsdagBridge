@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QHeaderView, QSizePolicy, QCheckBox, QGroupBox,
     QHBoxLayout, QFrame, QPushButton, QScrollArea, QTabWidget
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QDoubleValidator, QIntValidator
 
 from osdagbridge.core.utils.common import *
@@ -1565,9 +1565,22 @@ class UIBuilder(QWidget):
                 lambda text, k=field_id: ai._on_field_edited(k, text)
             )
 
-        def _on_changed(text, _combo=combo, _ai=ai, _fid=field_id):
-            if text != "Custom":
+        # The pick-list opens only when the user picks "Custom" (activated), never when
+        # the value is set by code (loading a member, mirroring the top flange, ...).
+        # `activated` also fires when "Custom" is picked again: the list then opens with the
+        # current selection so it can be changed. Cancel restores the previous choice.
+        state = {"text": combo.currentText(), "before": combo.currentText(), "changed": False}
+
+        def _track(text, _state=state):
+            _state["before"], _state["text"], _state["changed"] = _state["text"], text, True
+            QTimer.singleShot(0, lambda: _state.update(changed=False))
+
+        combo.currentTextChanged.connect(_track)
+
+        def _on_changed(_index, _combo=combo, _ai=ai, _fid=field_id, _state=state):
+            if _combo.currentText() != VALUE_CUSTOM:
                 return
+            previous = _state["before"] if _state["changed"] else VALUE_CUSTOM
             
             from osdagbridge.desktop.ui.dialogs.additional_input.dialogs.multi_select_dialog import CustomMultiSelectDialog
 
@@ -1594,13 +1607,11 @@ class UIBuilder(QWidget):
                 if on_selected and hasattr(owner, on_selected):
                     getattr(owner, on_selected)(_fid, chosen)
 
-            else:
-                # user cancelled — revert combo to "All"
-                _combo.blockSignals(True)
-                _combo.setCurrentText("All")
-                _combo.blockSignals(False)
+            elif previous != VALUE_CUSTOM:
+                # user cancelled a new "Custom" choice — go back to the previous option
+                _combo.setCurrentText(previous)
 
-        combo.currentTextChanged.connect(_on_changed)
+        combo.activated.connect(_on_changed)
         return combo
     
     @staticmethod

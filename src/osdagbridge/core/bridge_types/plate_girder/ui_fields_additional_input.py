@@ -4109,8 +4109,8 @@ CUSTOM_GIRDER_TEXT_FIELDS = [
     KEY_MP_GIRDER_TOP_FLANGE_WIDTH,
     KEY_MP_GIRDER_BOTTOM_FLANGE_WIDTH,
 ]
-# Mirrors the top flange for a symmetric girder, so it is not a separate input there
-CUSTOM_GIRDER_SYMMETRIC_SKIP = [KEY_MP_GIRDER_BOTTOM_FLANGE_WIDTH]
+# Mirror the top flange for a symmetric girder, so they are not separate inputs there
+CUSTOM_GIRDER_SYMMETRIC_SKIP = [KEY_MP_GIRDER_BOTTOM_FLANGE_WIDTH, KEY_MP_GIRDER_BOTTOM_FLANGE_THICKNESS]
 
 # All / Custom thickness dropdowns (Optimized mode); "Custom" needs a non-empty pick-list.
 # Stored per girder member as "<key>.G{n}.M{m}" with the list under "<key>.selected.G{n}.M{m}".

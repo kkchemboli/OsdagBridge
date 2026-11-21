@@ -9,7 +9,7 @@ from matplotlib.ticker import FuncFormatter
 from matplotlib.ticker import MaxNLocator
 import numpy as np
 import openseespy.opensees as ops
-from mpl_toolkits.mplot3d.art3d import Line3DCollection
+from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 from mpl_toolkits.mplot3d import proj3d
 from matplotlib.text import Annotation
 try:
@@ -17,6 +17,14 @@ try:
     _MPLCURSORS = True
 except ImportError:
     _MPLCURSORS = False
+
+from osdagbridge.core.utils.common import MEMBER_KIND_END_DIAPHRAGM
+
+from .results_data import (
+    member_line_displacements,
+    member_line_forces,
+    select_transverse_lines,
+)
 
 # Force component map
 FORCE_MAP = {
@@ -511,7 +519,7 @@ def _add_element_number_labels(ax, nodes, members, visible: bool = False):
 # GRILLAGE PLOT
 # =============================================================================
 
-def build_figure_grillage(nodes, members, edge_dist=0.0, selected_girder="All"):
+def build_figure_grillage(nodes, members, edge_dist=0.0, selected_girder="All", member_map=None):
     """
     Build a 3-D matplotlib figure showing only the bridge grillage mesh.
 
@@ -519,11 +527,18 @@ def build_figure_grillage(nodes, members, edge_dist=0.0, selected_girder="All"):
     ----------
     nodes   : dict  — {tag: [x, y, z]}
     members : dict  — {tag: [n1, n2]}
+    selected_girder : str — "All", a girder name, or a transverse member id.
+                      A girder name or a transverse member id shows only that
+                      member; "All" shows the whole grillage.
+    member_map : dict — results_data.build_member_map() output; needed only to
+                      recognise a transverse member id.
 
     Returns
     -------
     fig : matplotlib.figure.Figure
     """
+    selected_lines = select_transverse_lines(member_map, selected_girder)
+
     fig = Figure(figsize=(14, 6), dpi=110, facecolor="white")
     ax  = fig.add_subplot(111, projection="3d", facecolor="white")
 
@@ -540,7 +555,13 @@ def build_figure_grillage(nodes, members, edge_dist=0.0, selected_girder="All"):
     girder_items = list(girders.items())
     n_girders = len(girder_items)
 
-    bg_nodes, bg_members = _get_bg_nodes_members(nodes, members, edge_dist, selected_girder, girder_items)
+    if selected_lines:
+        # A transverse member, shown on its own like a selected girder.
+        line = selected_lines[0]
+        bg_members = {e: members[e] for e in line["elements"]}
+        bg_nodes = {n: nodes[n] for n in line["nodes"]}
+    else:
+        bg_nodes, bg_members = _get_bg_nodes_members(nodes, members, edge_dist, selected_girder, girder_items)
 
     _add_grillage_background(ax, bg_nodes, bg_members, show_transverse=True, include_end_transverse=True)
     _add_coordinate_triad(ax, nodes)
@@ -572,6 +593,12 @@ def build_figure_grillage(nodes, members, edge_dist=0.0, selected_girder="All"):
             ax.text(x_start - (x_range * 0.02), z_base, 0, f"{girder_name}",
                     color="black", fontsize=13, fontweight="normal",
                     ha="right", va="center", zorder=6, gid="girder_labels")
+
+    # A selected transverse member: solid line and label, as for a girder.
+    for line in selected_lines:
+        ax.plot([nodes[n][0] for n in line["nodes"]], [nodes[n][2] for n in line["nodes"]],
+                [0] * len(line["nodes"]), color=base_color, linewidth=1.5, zorder=3)
+        _add_transverse_label(ax, line, nodes, z_range)
 
     # Extract node IDs and coordinates properly for tracking
     node_ids = list(bg_nodes.keys())
@@ -1547,6 +1574,300 @@ def build_figure_deflection(ds, disp_key, nodes, members, edge_dist=0.0, eng_sca
         pane.set_alpha(1.0)
         
     ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
+    _add_coordinate_triad(ax, nodes, eng_scale=v_scale)
+    ax.set_axis_off()
+    return fig, summary_data
+
+
+# =============================================================================
+# TRANSVERSE MEMBER PLOT (end diaphragms / cross bracings)
+# =============================================================================
+
+# Camera for transverse diagrams. They lie in planes across the bridge width,
+# which the girder default (looking along the width) would show edge-on.
+TRANSVERSE_ELEV = 22
+TRANSVERSE_AZIM = -32
+
+# plot key -> (title, unit, line colour, fill colour or None, plotted sign)
+# The sign mirrors the girder diagrams: moments are drawn negated (BMD
+# convention), shears / axial as they are, deflections without a fill.
+_TRANSVERSE_STYLE = {
+    "Fx": ("Axial Force Diagram",    "kN",  "#1565C0", "#90CAF9",  1.0),
+    "Fy": ("Shear Force Diagram",    "kN",  "#1565C0", "#90CAF9",  1.0),
+    "Fz": ("Shear Force Diagram",    "kN",  "#1565C0", "#90CAF9",  1.0),
+    "Mx": ("Torsion Diagram",        "kNm", "#C62828", "#EF9A9A", -1.0),
+    "My": ("Bending Moment Diagram", "kNm", "#C62828", "#EF9A9A", -1.0),
+    "Mz": ("Bending Moment Diagram", "kNm", "#C62828", "#EF9A9A", -1.0),
+    "Dx": ("Deflection Diagram",     "mm",  "#6A1B9A", None,       1.0),
+    "Dy": ("Deflection Diagram",     "mm",  "#6A1B9A", None,       1.0),
+    "Dz": ("Deflection Diagram",     "mm",  "#6A1B9A", None,       1.0),
+}
+
+
+def _add_transverse_label(ax, line, nodes, z_range, index=0, x_offset=0.0, z_offset=0.0):
+    """Member id (ED1, CB3, ...) just outside one end of the line.
+
+    When several transverse members are drawn together (the "All" selection)
+    they sit about 1.5 m apart along the span, so consecutive labels go on
+    alternate sides of the bridge to keep them apart. ``x_offset`` /
+    ``z_offset`` move the label further along the span / across the width
+    (used to keep ED1 / ED2 clear of the girder labels).
+    """
+    if index % 2 == 0:
+        x0, _, z0 = nodes[line["nodes"][0]]
+        z0 -= z_range * 0.05
+    else:
+        x0, _, z0 = nodes[line["nodes"][-1]]
+        z0 += z_range * 0.05
+    ax.text(x0 + x_offset, z0 + z_offset, 0, line["id"],
+            color="black", fontsize=13, ha="center", va="center",
+            zorder=100, gid="girder_labels")
+
+
+def _draw_transverse_lines(fig, ax, ds_all, loadcase, plot_key, nodes, members,
+                           member_map, lines, v_scale):
+    """
+    Draw the diagrams of ``lines`` (member_map["transverse"] entries) on ``ax``.
+
+    Values come from results_data (member axes for forces, nodal values for
+    displacements). Returns ``(summary_data, vmin, vmax)``: the extremes per
+    member and the range of the plotted (scaled) heights.
+    """
+    _, unit, line_color, fill_color, plot_sign = _TRANSVERSE_STYLE[plot_key]
+    is_disp = plot_key in DISP_MAP
+    label = (DISP_DISPLAY if is_disp else FORCE_DISPLAY).get(plot_key, plot_key)
+    all_xs = [coord[0] for coord in nodes.values()]
+    all_zs = [coord[2] for coord in nodes.values()]
+    z_range = max(all_zs) - min(all_zs) or 1.0
+    x_mid = (max(all_xs) + min(all_xs)) / 2.0
+    # End diaphragms sit where the girder labels are: in the combined ("All")
+    # picture ED1's label goes further out past the near edge of the deck and
+    # ED2's goes past the end of the bridge.
+    end_label_shift = 0.06 * ((max(all_xs) - min(all_xs)) or 1.0)
+
+    base_color = "#388E3C"
+    summary_data = {}
+    _scatter_objs = []
+    _scatter_data = {}
+    vmin = vmax = 0.0
+
+    for i, line in enumerate(lines):
+        if is_disp:
+            data = member_line_displacements(ds_all, loadcase, line, nodes, members, plot_key)
+        else:
+            data = member_line_forces(ds_all, loadcase, line, nodes, members, plot_key)
+        if len(data["val_a"]) == 0:
+            continue
+
+        # Each element contributes its start and end point; the end of one
+        # element and the start of the next share a location, so a difference
+        # between them draws as the vertical jump at a girder.
+        px = np.column_stack([data["xa"], data["xb"]]).ravel()
+        pz = np.column_stack([data["za"], data["zb"]]).ravel()
+        vals = np.column_stack([data["val_a"], data["val_b"]]).ravel()
+        node_ids = np.column_stack([data["start_nodes"], data["end_nodes"]]).ravel()
+        ph = plot_sign * vals * v_scale
+
+        vmin = min(vmin, float(np.min(ph)))
+        vmax = max(vmax, float(np.max(ph)))
+
+        # baseline (the member itself) and its id
+        bx = [nodes[n][0] for n in line["nodes"]]
+        bz = [nodes[n][2] for n in line["nodes"]]
+        ax.plot(bx, bz, np.zeros(len(bx)), color=base_color, linewidth=1.5, zorder=3)
+        ax.scatter(bx, bz, np.zeros(len(bx)), color=base_color, s=5, zorder=4,
+                   depthshade=False, alpha=0.4)
+        x_shift = z_shift = 0.0
+        if len(lines) > 1 and line["kind"] == MEMBER_KIND_END_DIAPHRAGM:
+            if line["x"] < x_mid:
+                z_shift = -0.2 * z_range
+            else:
+                x_shift = end_label_shift
+        _add_transverse_label(ax, line, nodes, z_range, index=i,
+                              x_offset=x_shift, z_offset=z_shift)
+
+        if fill_color is not None:
+            polygons = []
+            for k in range(0, len(px), 2):
+                # one patch per element, between the diagram and the baseline
+                polygons.append([(px[k], pz[k], 0.0), (px[k], pz[k], ph[k]),
+                                 (px[k + 1], pz[k + 1], ph[k + 1]),
+                                 (px[k + 1], pz[k + 1], 0.0)])
+            if polygons:
+                ax.add_collection3d(Poly3DCollection(
+                    polygons, facecolor=fill_color, edgecolor="none",
+                    alpha=0.25, linewidths=0, zorder=2))
+
+        # diagram outline, closed down to the baseline at both ends
+        ax.plot(np.concatenate([[px[0]], px, [px[-1]]]),
+                np.concatenate([[pz[0]], pz, [pz[-1]]]),
+                np.concatenate([[0.0], ph, [0.0]]),
+                color=line_color, linewidth=2.0, zorder=4)
+
+        sc = ax.scatter(px, pz, ph, color=line_color, s=30, zorder=5, depthshade=False)
+        _scatter_objs.append(sc)
+        _scatter_data[id(sc)] = (line["id"], node_ids, vals)
+
+        idx_max = int(np.argmax(vals))
+        idx_min = int(np.argmin(vals))
+        summary_data[line["id"]] = {"max": float(vals[idx_max]), "min": float(vals[idx_min])}
+
+        for idx, gid, color in ((idx_max, "max_line", "#FF4136"),
+                                (idx_min, "min_line", "#0074D9")):
+            ax.plot([px[idx], px[idx]], [pz[idx], pz[idx]], [0, ph[idx]],
+                    color=color, linewidth=1.5, linestyle="--", zorder=3, gid=gid)
+            ax.text(px[idx], pz[idx], ph[idx], f" {vals[idx]:.2f} {unit}",
+                    color="#333333", fontsize=8, fontweight="bold", zorder=6, gid=gid,
+                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.0))
+
+        # "All" values — skip a point that repeats the previous one (no jump)
+        for k in range(len(px)):
+            if k in (idx_max, idx_min) or abs(vals[k]) < 1e-4:
+                continue
+            if (k > 0 and abs(px[k] - px[k - 1]) < 1e-9 and abs(pz[k] - pz[k - 1]) < 1e-9
+                    and abs(vals[k] - vals[k - 1]) < 1e-6):
+                continue
+            ax.text(px[k], pz[k], ph[k], f" {vals[k]:.2f} {unit}",
+                    color="#555555", fontsize=7, zorder=5, gid="all_vals")
+
+    if _MPLCURSORS and _scatter_objs:
+        cursor = mplcursors.cursor(_scatter_objs, hover=True)
+        # keep the cursor and its timers alive with the figure (separate from
+        # any cursor a girder builder already attached to it)
+        fig._transverse_cursor = cursor
+        fig._transverse_hover_timers = {}
+
+        @cursor.connect("add")
+        def on_add(sel, _data=_scatter_data, _label=label, _unit=unit):
+            member_id, nids, vals_g = _data[id(sel.artist)]
+            idx = sel.index
+            sel.annotation.set_text(
+                f"{member_id}  Node {nids[idx]}\n{_label}: {vals_g[idx]:.3f} {_unit}"
+            )
+            sel.annotation.get_bbox_patch().set(fc="white", alpha=0.9, edgecolor="#BBBBBB")
+
+            timers = fig._transverse_hover_timers
+            sel_id = id(sel)
+            if sel_id in timers:
+                timers[sel_id].stop()
+            timer = fig.canvas.new_timer(interval=3000)
+            timer.single_shot = True
+            timers[sel_id] = timer
+
+            def auto_hide():
+                try:
+                    sel.annotation.set_visible(False)
+                    fig.canvas.draw_idle()
+                except Exception:
+                    pass
+                finally:
+                    timers.pop(sel_id, None)
+
+            timer.add_callback(auto_hide)
+            timer.start()
+
+    return summary_data, vmin, vmax
+
+
+def add_transverse_members(fig, ds_all, loadcase, plot_key, nodes, members, member_map,
+                           eng_scale=1.0):
+    """
+    Add every transverse member's diagram to a girder figure (the "All"
+    selection), on the same value scale, and widen the value axis so both fit.
+
+    ``fig`` is the output of build_figure_sfd / build_figure_bmd /
+    build_figure_deflection for the same load case and component. Returns
+    ``{member id: {"max", "min"}}`` for the transverse members added.
+    """
+    lines = (member_map or {}).get("transverse") or []
+    if not lines or not fig.axes:
+        return {}
+    ax = fig.axes[0]
+    summary, vmin, vmax = _draw_transverse_lines(
+        fig, ax, ds_all, loadcase, plot_key, nodes, members, member_map, lines,
+        _value_plot_scale(eng_scale))
+
+    lo, hi = ax.get_zlim()
+    pad = max(1e-6, 0.05 * max(1e-9, max(hi, vmax) - min(lo, vmin)))
+    ax.set_zlim(min(lo, vmin - pad), max(hi, vmax + pad))
+    return summary
+
+
+def build_figure_transverse(ds_all, loadcase, plot_key, nodes, members, member_map,
+                            selection, edge_dist=0.0, eng_scale=1.0):
+    """
+    Build a 3-D matplotlib figure of one result component along one transverse
+    member (an end diaphragm or a cross bracing).
+
+    Parameters
+    ----------
+    ds_all     : xarray.Dataset — results for all load cases; the selected
+                 load case is read from it by results_data
+    loadcase   : str  — load case / combination to plot
+    plot_key   : str  — "Fx", "Fy", "Fz", "Mx", "My", "Mz", "Dx", "Dy" or "Dz".
+                 Forces are in the member's own axes (x along the member).
+    nodes, members : dicts from build_nodes_members()
+    member_map : dict — results_data.build_member_map() output
+    selection  : str  — a transverse member id from the Member dropdown
+
+    Returns
+    -------
+    fig          : matplotlib.figure.Figure
+    summary_data : dict — {member id: {"max": float, "min": float}}
+    """
+    v_scale = _value_plot_scale(eng_scale)
+    title, unit, _, _, plot_sign = _TRANSVERSE_STYLE[plot_key]
+    is_disp = plot_key in DISP_MAP
+    label = (DISP_DISPLAY if is_disp else FORCE_DISPLAY).get(plot_key, plot_key)
+    lines = select_transverse_lines(member_map, selection)
+
+    fig = Figure(figsize=(14, 6), dpi=110, facecolor="white")
+    ax = fig.add_subplot(111, projection="3d", facecolor="white")
+
+    all_xs = [coord[0] for coord in nodes.values()]
+    all_zs = [coord[2] for coord in nodes.values()]
+    x_range = max(all_xs) - min(all_xs) or 1.0
+    z_range = max(all_zs) - min(all_zs) or 1.0
+    ax.set_xlim(min(all_xs), max(all_xs))
+    ax.set_ylim(min(all_zs), max(all_zs))
+
+    # Girder lines as faint context behind the transverse diagrams.
+    _add_grillage_background(
+        ax, nodes, members,
+        show_transverse=False,
+        include_edge_longitudinals=True,
+        include_end_transverse=False,
+        show_inner_nodes=False,
+    )
+
+    summary_data, global_vmin, global_vmax = _draw_transverse_lines(
+        fig, ax, ds_all, loadcase, plot_key, nodes, members, member_map, lines, v_scale)
+
+    _add_supports(ax, nodes, members, edge_dist=edge_dist, selected_girder="All")
+    _add_node_number_labels(ax, nodes)
+    _add_element_number_labels(ax, nodes, members)  # hidden by default; toggled by toolbar
+    ax.set_xlabel("Span Length (m)", fontsize=10, labelpad=8)
+    ax.set_ylabel("Bridge Width (m)", fontsize=10, labelpad=8)
+    ax.set_zlabel(f"{label} ({unit})", fontsize=10, labelpad=8)
+    _set_value_axis_tick_formatter(ax, v_scale, value_sign=plot_sign, use_abs=plot_sign < 0)
+
+    zmin = min(0.0, global_vmin)
+    zmax = max(0.0, global_vmax)
+    z_span = max(1e-9, zmax - zmin)
+    pad = max(1e-6, 0.05 * z_span)
+    ax.set_zlim(zmin - pad, zmax + pad)
+    ax.set_box_aspect([x_range, z_range, (x_range * 0.30) * max(v_scale, 1e-6)])
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=4, steps=[1, 2, 2.5, 5, 10]))
+    ax.set_title(f"{title}  —  {label} ({unit})", fontsize=12, fontweight="bold", pad=12)
+    fig._eng_scale = v_scale
+    ax.view_init(elev=TRANSVERSE_ELEV, azim=TRANSVERSE_AZIM)
+    for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+        pane.fill = False
+        pane.set_edgecolor("#555555")
+        pane.set_linewidth(1.5)
+        pane.set_alpha(1.0)
+    ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
+
     _add_coordinate_triad(ax, nodes, eng_scale=v_scale)
     ax.set_axis_off()
     return fig, summary_data

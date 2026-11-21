@@ -855,7 +855,10 @@ class AdditionalInputs(QDialog):
                         add(f"{additional_input_label(key)} {member_name}", holder, (gi, mi))
             else:
                 # All / Custom thickness dropdown: Custom needs at least one picked value
+                symmetric = str(d.get(KEY_MP_GIRDER_SYMMETRY + suffix, "")).strip() == VALUES_GIRDER_SYMMETRY[0]
                 for key in CUSTOM_GIRDER_SELECT_FIELDS:
+                    if symmetric and key in CUSTOM_GIRDER_SYMMETRIC_SKIP:
+                        continue
                     if d.get(key + suffix) == VALUE_CUSTOM and not d.get(key + KEY_SUFFIX_SELECTED + suffix):
                         add(f"{additional_input_label(key)} {member_name}", self.findChild(QWidget, key), (gi, mi))
 
@@ -1841,6 +1844,8 @@ class AdditionalInputs(QDialog):
         self.working_input_dict[field_id + ".selected" + suffix] = chosen
         self.working_input_dict[field_id + suffix] = "Custom"
         print(f"[ALL_CUSTOM_SELECTED] {field_id}.selected{suffix} = {chosen}")
+        if field_id == KEY_MP_GIRDER_TOP_FLANGE_THICKNESS:
+            self._on_top_flange_changed()       # symmetric girder: bottom flange follows the top
 
     def _copy_girder_properties(self, source_g: int, target_g: int) -> None:
         import copy, re
@@ -1914,6 +1919,13 @@ class AdditionalInputs(QDialog):
             _write(bt_w, tt_val)
             self.working_input_dict[KEY_MP_GIRDER_BOTTOM_FLANGE_THICKNESS + suffix] = tt_val
             self.working_input_dict[KEY_MP_GIRDER_BOTTOM_FLANGE_THICKNESS] = tt_val
+            # A "Custom" thickness also carries the picked values: mirror them as well
+            top_selected = self.working_input_dict.get(
+                KEY_MP_GIRDER_TOP_FLANGE_THICKNESS + KEY_SUFFIX_SELECTED + suffix)
+            if tt_val == VALUE_CUSTOM and top_selected is not None:
+                for key in (KEY_MP_GIRDER_BOTTOM_FLANGE_THICKNESS + KEY_SUFFIX_SELECTED + suffix,
+                            KEY_MP_GIRDER_BOTTOM_FLANGE_THICKNESS + KEY_SUFFIX_SELECTED):
+                    self.working_input_dict[key] = list(top_selected)
 
         self._update_section_drawing()
 
